@@ -15,7 +15,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     polyscope
     GIT_REPOSITORY https://github.com/nmwsharp/polyscope.git
-    GIT_TAG v2.2
+    GIT_TAG v2.2.1
 )
 
 FetchContent_MakeAvailable(eigen polyscope)
