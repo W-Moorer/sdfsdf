@@ -15,6 +15,9 @@ target_link_libraries(test_phase3 PRIVATE vde_core)
 add_executable(test_phase4 test_phase4.cpp)
 target_link_libraries(test_phase4 PRIVATE vde_core)
 
+add_executable(test_phase5 test_phase5.cpp)
+target_link_libraries(test_phase5 PRIVATE vde_core)
+
 # 添加测试
 enable_testing()
 add_test(NAME SDFTest COMMAND test_sdf)
@@ -22,3 +25,4 @@ add_test(NAME Phase1Test COMMAND test_phase1)
 add_test(NAME Phase2Test COMMAND test_phase2)
 add_test(NAME Phase3Test COMMAND test_phase3)
 add_test(NAME Phase4Test COMMAND test_phase4)
+add_test(NAME Phase5Test COMMAND test_phase5)

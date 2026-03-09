@@ -9,6 +9,7 @@
 #pragma once
 
 #include "AnalyticalSDF.h"
+#include "collision/SpatialHash.h"
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <vector>
@@ -39,87 +40,7 @@ struct ContactGeometry {
           weighted_centroid(Eigen::Vector3d::Zero()) {}
 };
 
-/**
- * @brief AABB (Axis-Aligned Bounding Box) structure
- */
-struct AABB {
-    Eigen::Vector3d min;
-    Eigen::Vector3d max;
-
-    AABB() : min(Eigen::Vector3d::Zero()), max(Eigen::Vector3d::Zero()) {}
-
-    AABB(const Eigen::Vector3d& min_corner, const Eigen::Vector3d& max_corner)
-        : min(min_corner), max(max_corner) {}
-
-    /**
-     * @brief Compute bounding box center
-     */
-    Eigen::Vector3d center() const {
-        return (min + max) * 0.5;
-    }
-
-    /**
-     * @brief Compute bounding box size
-     */
-    Eigen::Vector3d size() const {
-        return max - min;
-    }
-
-    /**
-     * @brief Compute bounding box volume
-     */
-    double volume() const {
-        Eigen::Vector3d s = size();
-        return s.x() * s.y() * s.z();
-    }
-
-    /**
-     * @brief Check if two AABBs intersect
-     */
-    bool intersects(const AABB& other) const {
-        return (min.x() <= other.max.x() && max.x() >= other.min.x()) &&
-               (min.y() <= other.max.y() && max.y() >= other.min.y()) &&
-               (min.z() <= other.max.z() && max.z() >= other.min.z());
-    }
-
-    /**
-     * @brief Compute intersection of two AABBs
-     */
-    AABB intersection(const AABB& other) const {
-        Eigen::Vector3d new_min = min.cwiseMax(other.min);
-        Eigen::Vector3d new_max = max.cwiseMin(other.max);
-
-        // If no intersection, return empty bounding box
-        if ((new_max - new_min).minCoeff() < 0) {
-            return AABB(new_min, new_min);  // Empty bounding box
-        }
-
-        return AABB(new_min, new_max);
-    }
-
-    /**
-     * @brief Check if bounding box is empty
-     */
-    bool isEmpty() const {
-        return (max - min).minCoeff() <= 0;
-    }
-
-    /**
-     * @brief Expand bounding box to include point
-     */
-    void expand(const Eigen::Vector3d& point) {
-        min = min.cwiseMin(point);
-        max = max.cwiseMax(point);
-    }
-
-    /**
-     * @brief Expand bounding box by margin
-     */
-    void expand(double margin) {
-        min -= Eigen::Vector3d(margin, margin, margin);
-        max += Eigen::Vector3d(margin, margin, margin);
-    }
-};
+// AABB is now defined in collision/SpatialHash.h
 
 /**
  * @brief Volumetric integrator

@@ -121,6 +121,14 @@ public:
         : properties_(props) {}
 
     /**
+     * @brief Constructor with mass only (for simplified usage)
+     */
+    explicit RigidBody(double mass)
+        : properties_(RigidBodyProperties()) {
+        properties_.mass = mass;
+    }
+
+    /**
      * @brief Get current state
      */
     const RigidBodyState& state() const { return state_; }
@@ -282,6 +290,62 @@ public:
      */
     double totalEnergy(const Eigen::Vector3d& gravity) const {
         return kineticEnergy() + potentialEnergy(gravity);
+    }
+
+    /**
+     * @brief Get position
+     */
+    Eigen::Vector3d position() const {
+        return state_.position;
+    }
+
+    /**
+     * @brief Set position
+     */
+    void setPosition(const Eigen::Vector3d& pos) {
+        state_.position = pos;
+    }
+
+    /**
+     * @brief Get linear velocity
+     */
+    Eigen::Vector3d linearVelocity() const {
+        return state_.linear_velocity;
+    }
+
+    /**
+     * @brief Set linear velocity
+     */
+    void setLinearVelocity(const Eigen::Vector3d& vel) {
+        state_.linear_velocity = vel;
+    }
+
+    /**
+     * @brief Get linear momentum
+     */
+    Eigen::Vector3d linearMomentum() const {
+        return properties_.mass * state_.linear_velocity;
+    }
+
+    /**
+     * @brief Get mass
+     */
+    double mass() const {
+        return properties_.mass;
+    }
+
+    /**
+     * @brief Apply force at point (wrapper for applyForceAtPoint)
+     */
+    void applyForce(const Eigen::Vector3d& force, const Eigen::Vector3d& world_point) {
+        applyForceAtPoint(force, world_point);
+    }
+
+    /**
+     * @brief Semi-implicit Euler integration (simplified interface)
+     */
+    void semiImplicitEuler(double dt) {
+        integrate(dt, Eigen::Vector3d::Zero());
     }
 
 private:
