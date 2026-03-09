@@ -4,7 +4,14 @@ project(VolumetricDynamicsEngine VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(CTest)
 include(FetchContent)
+
+# Third-party dependencies should not pollute the project's root CTest entry.
+set(VDE_BUILD_TESTING ${BUILD_TESTING})
+set(BUILD_TESTING OFF CACHE BOOL "Disable third-party tests during dependency configuration" FORCE)
+set(EIGEN_BUILD_DOC OFF CACHE BOOL "Disable Eigen documentation build" FORCE)
+set(GLM_BUILD_TESTS OFF CACHE BOOL "Disable GLM tests" FORCE)
 
 FetchContent_Declare(
     eigen
@@ -20,6 +27,8 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(eigen polyscope)
 
+set(BUILD_TESTING ${VDE_BUILD_TESTING} CACHE BOOL "Enable VolumetricDynamicsEngine tests" FORCE)
+
 include_directories(${eigen_SOURCE_DIR})
 
 add_library(vde_core INTERFACE)
@@ -32,5 +41,7 @@ target_link_libraries(vde_core INTERFACE
 )
 
 add_subdirectory(src)
-add_subdirectory(tests)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 add_subdirectory(examples)
