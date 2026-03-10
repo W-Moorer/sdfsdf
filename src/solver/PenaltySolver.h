@@ -32,6 +32,21 @@ struct PenaltyParameters {
 };
 
 /**
+ * @brief Diagnostic output for a single penalty contact evaluation
+ */
+struct PenaltyContactResult {
+    bool active = false;
+    double penetration_depth = 0.0;
+    double contact_area = 0.0;
+    double overlap_volume = 0.0;
+    double normal_velocity = 0.0;
+    double normal_force = 0.0;
+    Eigen::Vector2d tangential_velocity = Eigen::Vector2d::Zero();
+    Eigen::Vector2d tangential_force = Eigen::Vector2d::Zero();
+    Eigen::Vector3d world_force = Eigen::Vector3d::Zero();
+};
+
+/**
  * @brief Penalty-based contact solver
  *
  * Computes contact forces based on penetration volume:
@@ -55,43 +70,54 @@ public:
                       RigidBody& body_b,
                       const ContactConstraint& contact,
                       double dt) {
-        // Only apply force if penetrating
+        solveContactDetailed(body_a, body_b, contact, dt);
+    }
+
+    /**
+     * @brief Solve contact and return diagnostic force information
+     */
+    PenaltyContactResult solveContactDetailed(RigidBody& body_a,
+                                             RigidBody& body_b,
+                                             const ContactConstraint& contact,
+                                             double dt) {
+        (void)dt;
+
+        PenaltyContactResult result;
         if (contact.g_eq >= 0) {
-            return;
+            return result;
         }
 
-        // Compute penetration volume (approximated)
-        double penetration_depth = -contact.g_eq;
-        double contact_area = estimateContactArea(contact);
-        double overlap_volume = penetration_depth * contact_area;
+        result.active = true;
+        result.penetration_depth = -contact.g_eq;
+        result.contact_area = estimateContactArea(contact);
+        result.overlap_volume = result.penetration_depth * result.contact_area;
 
-        // Get velocities at contact point
         SpatialVector v_a, v_b;
         v_a << body_a.state().linear_velocity, body_a.state().angular_velocity;
         v_b << body_b.state().linear_velocity, body_b.state().angular_velocity;
 
-        // Compute relative velocity
-        double v_n = contact.computeNormalVelocity(v_a, v_b);
-        Eigen::Vector2d v_t = contact.computeTangentialVelocity(v_a, v_b);
+        result.normal_velocity = contact.computeNormalVelocity(v_a, v_b);
+        result.tangential_velocity = contact.computeTangentialVelocity(v_a, v_b);
 
-        // Normal force (penalty + damping)
-        double F_n = params_.stiffness * overlap_volume - params_.damping * v_n;
-        F_n = std::max(0.0, F_n);  // Only repulsive
+        result.normal_force =
+            params_.stiffness * result.overlap_volume - params_.damping * result.normal_velocity;
+        result.normal_force = std::max(0.0, result.normal_force);
 
-        // Tangential force (Coulomb friction)
-        Eigen::Vector2d F_t = -params_.friction_coefficient * F_n * v_t.normalized();
-        if (v_t.norm() < 1e-10) {
-            F_t.setZero();  // Static friction
+        if (result.tangential_velocity.norm() >= 1e-10) {
+            result.tangential_force =
+                -params_.friction_coefficient * result.normal_force *
+                result.tangential_velocity.normalized();
         }
 
-        // Convert to world frame force and torque
-        Eigen::Vector3d F_world = F_n * contact.contact.normal +
-                                   F_t(0) * contact.contact.tangent1 +
-                                   F_t(1) * contact.contact.tangent2;
+        result.world_force =
+            result.normal_force * contact.contact.normal +
+            result.tangential_force(0) * contact.contact.tangent1 +
+            result.tangential_force(1) * contact.contact.tangent2;
 
-        // Apply equal and opposite forces
-        body_a.applyForceAtPoint(-F_world, contact.contact.position);
-        body_b.applyForceAtPoint(F_world, contact.contact.position);
+        // Positive contact normal is the repulsive action on body A.
+        body_a.applyForceAtPoint(result.world_force, contact.contact.position);
+        body_b.applyForceAtPoint(-result.world_force, contact.contact.position);
+        return result;
     }
 
     /**

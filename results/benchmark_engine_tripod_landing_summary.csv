@@ -1,0 +1,2 @@
+peak_soccp_penetration,peak_penalty_penetration,penetration_reduction,peak_soccp_residual,max_soccp_iterations,max_soccp_contacts,max_penalty_contacts,soccp_three_contact_steps,penalty_three_contact_steps,final_soccp_tilt_deg,final_penalty_tilt_deg
+0.0063915192,0.0349371255,0.8170565228,0.0122336149,17.0000000000,3.0000000000,3.0000000000,2.0000000000,5.0000000000,20.5102074915,96.7481962786

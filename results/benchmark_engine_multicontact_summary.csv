@@ -1,2 +1,2 @@
-peak_soccp_penetration,peak_penalty_penetration,penetration_reduction,peak_soccp_residual
-0.0296296296,0.0990905496,0.7009843043,1.8950280547
+peak_soccp_penetration,peak_penalty_penetration,penetration_reduction,peak_soccp_residual,max_soccp_iterations,residual_exceed_steps
+0.0296296296,0.0990905496,0.7009843043,0.2893066406,17.0000000000,40.0000000000

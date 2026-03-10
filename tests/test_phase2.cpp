@@ -15,6 +15,7 @@
 #include "math/JordanAlgebra.h"
 #include "math/FischerBurmeister.h"
 #include "dynamics/ContactDynamics.h"
+#include "solver/NormalLCPSolver.h"
 #include "solver/SemiSmoothNewton.h"
 #include "solver/SOCCPSolver.h"
 
@@ -442,6 +443,200 @@ bool testSOCCPSolverCore() {
     return passed;
 }
 
+bool testSOCCP3DBaselineBranch() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "SOCCP 3D Friction Baseline Branch Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    SOCCPProblem problem = makeReferenceSOCCPProblem();
+    problem.torsion_enabled = Eigen::ArrayXi::Zero(problem.numContacts());
+    problem.tangential_jacobian.row(2).setZero();
+
+    SOCCPSolver solver(100, 1e-10, problem.epsilon);
+    SOCCPSolution solution;
+    const bool converged = solver.solve(problem, solution);
+
+    const double lambda_tau = solution.lambda_t(2);
+    const double residual_inf = solution.residual.lpNorm<Eigen::Infinity>();
+    const bool torsion_disabled = std::abs(lambda_tau) < 1e-8;
+
+    std::cout << "Converged: " << (converged ? "YES" : "NO") << std::endl;
+    std::cout << "Residual inf-norm: " << residual_inf << std::endl;
+    std::cout << "lambda_tau: " << lambda_tau << std::endl;
+    std::cout << "Torsion disabled: " << (torsion_disabled ? "YES" : "NO") << std::endl;
+
+    const bool passed = converged && torsion_disabled && residual_inf < 1e-7;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testSOCCPScalarLCPDegeneracy() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "SOCCP Scalar LCP Degeneracy Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    SOCCPProblem problem;
+    problem.mass_matrix = Eigen::MatrixXd::Identity(6, 6);
+    problem.mass_matrix.block<3, 3>(3, 3) = 0.2 * Eigen::Matrix3d::Identity();
+    problem.free_velocity = Eigen::VectorXd::Zero(6);
+    problem.free_velocity(1) = -2.0;
+    problem.normal_jacobian = Eigen::MatrixXd::Zero(1, 6);
+    problem.normal_jacobian(0, 1) = 1.0;
+    problem.tangential_jacobian = Eigen::MatrixXd::Zero(3, 6);
+    problem.g_eq = Eigen::VectorXd::Constant(1, -0.01);
+    problem.friction_coefficients = Eigen::VectorXd::Zero(1);
+    problem.baumgarte_gamma = Eigen::VectorXd::Constant(1, 0.10);
+    problem.torsion_enabled = Eigen::ArrayXi::Zero(1);
+    problem.time_step = 0.01;
+    problem.epsilon = 1e-8;
+
+    const double b =
+        (problem.normal_jacobian * problem.free_velocity)(0) +
+        (problem.baumgarte_gamma(0) / problem.time_step) * problem.g_eq(0);
+    const double A =
+        problem.time_step *
+        (problem.normal_jacobian * problem.mass_matrix.inverse() * problem.normal_jacobian.transpose())(0, 0);
+    const double lambda_expected = (A > 1e-12 && b < 0.0) ? (-b / A) : 0.0;
+    const Eigen::VectorXd velocity_expected =
+        problem.free_velocity +
+        problem.time_step * problem.mass_matrix.inverse() *
+        problem.normal_jacobian.transpose() * Eigen::VectorXd::Constant(1, lambda_expected);
+
+    SOCCPSolver solver(100, 1e-10, problem.epsilon);
+    SOCCPSolution solution;
+    const bool converged = solver.solve(problem, solution);
+
+    const double lambda_error = std::abs(solution.lambda_n(0) - lambda_expected);
+    const double velocity_error = (solution.velocity - velocity_expected).norm();
+    const double residual_inf = solution.residual.lpNorm<Eigen::Infinity>();
+
+    std::cout << "Converged: " << (converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_expected: " << lambda_expected << std::endl;
+    std::cout << "lambda_soccp: " << solution.lambda_n(0) << std::endl;
+    std::cout << "lambda_error: " << lambda_error << std::endl;
+    std::cout << "velocity_error: " << velocity_error << std::endl;
+    std::cout << "residual_inf: " << residual_inf << std::endl;
+
+    const bool passed =
+        converged &&
+        lambda_error < 1e-7 &&
+        velocity_error < 1e-7 &&
+        residual_inf < 1e-7;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testNormalLCPGlobalSolve() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Normal LCP Global Solve Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    NormalLCPProblem problem;
+    problem.mass_matrix = Eigen::MatrixXd::Identity(2, 2);
+    problem.free_velocity = Eigen::VectorXd::Zero(2);
+    problem.free_velocity << -1.0, -0.5;
+    problem.normal_jacobian = Eigen::MatrixXd::Zero(2, 2);
+    problem.normal_jacobian << 1.0, 0.0,
+                               1.0, 1.0;
+    problem.g_eq = Eigen::VectorXd::Zero(2);
+    problem.baumgarte_gamma = Eigen::VectorXd::Zero(2);
+    problem.time_step = 1.0;
+
+    const Eigen::Vector2d lambda_expected(0.5, 0.5);
+    const Eigen::Vector2d velocity_expected = Eigen::Vector2d::Zero();
+
+    NormalLCPSolver solver(200, 1e-12, 1.0);
+    NormalLCPSolution solution;
+    const bool converged = solver.solve(problem, solution);
+
+    const double lambda_error = (solution.lambda_n - lambda_expected).norm();
+    const double velocity_error = (solution.velocity - velocity_expected).norm();
+    const double residual_inf = solution.residual.lpNorm<Eigen::Infinity>();
+
+    std::cout << "Converged: " << (converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_expected: " << lambda_expected.transpose() << std::endl;
+    std::cout << "lambda_lcp: " << solution.lambda_n.transpose() << std::endl;
+    std::cout << "velocity_lcp: " << solution.velocity.transpose() << std::endl;
+    std::cout << "lambda_error: " << lambda_error << std::endl;
+    std::cout << "velocity_error: " << velocity_error << std::endl;
+    std::cout << "residual_inf: " << residual_inf << std::endl;
+
+    const bool passed =
+        converged &&
+        lambda_error < 1e-9 &&
+        velocity_error < 1e-9 &&
+        residual_inf < 1e-9;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testNormalLCPMatchesSOCCPNormalOnly() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Normal LCP vs SOCCP Normal-Only Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    Eigen::MatrixXd mass_matrix = Eigen::MatrixXd::Identity(2, 2);
+    Eigen::VectorXd free_velocity = Eigen::VectorXd::Zero(2);
+    free_velocity << -1.0, -0.5;
+    Eigen::MatrixXd Jn = Eigen::MatrixXd::Zero(2, 2);
+    Jn << 1.0, 0.0,
+          1.0, 1.0;
+    Eigen::VectorXd g_eq = Eigen::VectorXd::Zero(2);
+    Eigen::VectorXd gamma = Eigen::VectorXd::Zero(2);
+
+    NormalLCPProblem lcp_problem;
+    lcp_problem.mass_matrix = mass_matrix;
+    lcp_problem.free_velocity = free_velocity;
+    lcp_problem.normal_jacobian = Jn;
+    lcp_problem.g_eq = g_eq;
+    lcp_problem.baumgarte_gamma = gamma;
+    lcp_problem.time_step = 1.0;
+
+    SOCCPProblem soccp_problem;
+    soccp_problem.mass_matrix = mass_matrix;
+    soccp_problem.free_velocity = free_velocity;
+    soccp_problem.normal_jacobian = Jn;
+    soccp_problem.tangential_jacobian = Eigen::MatrixXd::Zero(6, 2);
+    soccp_problem.g_eq = g_eq;
+    soccp_problem.friction_coefficients = Eigen::VectorXd::Zero(2);
+    soccp_problem.baumgarte_gamma = gamma;
+    soccp_problem.torsion_enabled = Eigen::ArrayXi::Zero(2);
+    soccp_problem.time_step = 1.0;
+    soccp_problem.epsilon = 1e-8;
+
+    NormalLCPSolver lcp_solver(200, 1e-12, 1.0);
+    NormalLCPSolution lcp_solution;
+    const bool lcp_converged = lcp_solver.solve(lcp_problem, lcp_solution);
+
+    SOCCPSolver soccp_solver(200, 1e-12, soccp_problem.epsilon);
+    SOCCPSolution soccp_solution;
+    const bool soccp_converged = soccp_solver.solve(soccp_problem, soccp_solution);
+
+    const double lambda_error = (lcp_solution.lambda_n - soccp_solution.lambda_n).norm();
+    const double velocity_error = (lcp_solution.velocity - soccp_solution.velocity).norm();
+    const double lcp_residual = lcp_solution.residual.lpNorm<Eigen::Infinity>();
+    const double soccp_residual = soccp_solution.residual.lpNorm<Eigen::Infinity>();
+
+    std::cout << "LCP converged: " << (lcp_converged ? "YES" : "NO") << std::endl;
+    std::cout << "SOCCP converged: " << (soccp_converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_lcp: " << lcp_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_soccp: " << soccp_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_error: " << lambda_error << std::endl;
+    std::cout << "velocity_error: " << velocity_error << std::endl;
+    std::cout << "lcp_residual_inf: " << lcp_residual << std::endl;
+    std::cout << "soccp_residual_inf: " << soccp_residual << std::endl;
+
+    const bool passed =
+        lcp_converged &&
+        soccp_converged &&
+        lambda_error < 1e-7 &&
+        velocity_error < 1e-7 &&
+        lcp_residual < 1e-9 &&
+        soccp_residual < 1e-7;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 2 Acceptance Tests" << std::endl;
@@ -453,6 +648,10 @@ int main() {
     bool criterion1 = testCriterion1_FBZeroTheorem();
     bool criterion2 = testCriterion2_QuadraticConvergence();
     bool soccp_solver_test = testSOCCPSolverCore();
+    bool soccp_3d_branch_test = testSOCCP3DBaselineBranch();
+    bool soccp_scalar_lcp_test = testSOCCPScalarLCPDegeneracy();
+    bool normal_lcp_global_test = testNormalLCPGlobalSolve();
+    bool normal_lcp_soccp_match_test = testNormalLCPMatchesSOCCPNormalOnly();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 2 Acceptance Summary" << std::endl;
@@ -463,6 +662,10 @@ int main() {
     std::cout << "Criterion 1 (FB Zero Theorem): " << (criterion1 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Criterion 2 (Quadratic Convergence): " << (criterion2 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "SOCCP Core Solve: " << (soccp_solver_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "SOCCP 3D Baseline Branch: " << (soccp_3d_branch_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "SOCCP Scalar LCP Degeneracy: " << (soccp_scalar_lcp_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Normal LCP Global Solve: " << (normal_lcp_global_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Normal LCP vs SOCCP Normal-Only: " << (normal_lcp_soccp_match_test ? "PASSED" : "FAILED") << std::endl;
 
     bool all_passed =
         jordan_test &&
@@ -470,7 +673,11 @@ int main() {
         soccp_jacobian_test &&
         criterion1 &&
         criterion2 &&
-        soccp_solver_test;
+        soccp_solver_test &&
+        soccp_3d_branch_test &&
+        soccp_scalar_lcp_test &&
+        normal_lcp_global_test &&
+        normal_lcp_soccp_match_test;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;

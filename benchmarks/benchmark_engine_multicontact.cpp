@@ -108,8 +108,8 @@ int main() {
     config.enable_friction = false;
     config.contact_grid_resolution = 28;
     config.contact_p_norm = 2.0;
-    config.baumgarte_gamma = 0.75;
-    config.max_solver_iterations = 100;
+    config.baumgarte_gamma = 0.10;
+    config.max_solver_iterations = 160;
     config.solver_tolerance = 1e-8;
 
     SimulationEngine soccp_engine(config);
@@ -158,6 +158,8 @@ int main() {
     double peak_soccp_penetration = 0.0;
     double peak_penalty_penetration = 0.0;
     double peak_soccp_residual = 0.0;
+    double max_soccp_iterations = 0.0;
+    double residual_exceed_steps = 0.0;
 
     const int num_steps = static_cast<int>(duration / dt);
     for (int step = 0; step < num_steps; ++step) {
@@ -173,12 +175,17 @@ int main() {
         peak_soccp_penetration = std::max(peak_soccp_penetration, soccp_penetration);
         peak_penalty_penetration = std::max(peak_penalty_penetration, penalty_penetration);
         peak_soccp_residual = std::max(peak_soccp_residual, soccp_stats.solver_residual);
+        max_soccp_iterations = std::max(max_soccp_iterations, static_cast<double>(soccp_stats.solver_iterations));
+        if (soccp_stats.solver_residual > 1e-4) {
+            residual_exceed_steps += 1.0;
+        }
 
         rows.push_back(vectorToRow({
             soccp_engine.currentTime(),
             soccp_penetration,
             penalty_penetration,
             soccp_stats.solver_residual,
+            static_cast<double>(soccp_stats.solver_iterations),
             soccp_stats.total_energy,
             kineticEnergy(penalty_bodies)
         }));
@@ -191,16 +198,18 @@ int main() {
     const auto dir = resultsDirectory();
     writeCsv(
         dir / "benchmark_engine_multicontact.csv",
-        {"time", "soccp_penetration", "penalty_penetration", "soccp_residual", "soccp_energy", "penalty_energy"},
+        {"time", "soccp_penetration", "penalty_penetration", "soccp_residual", "soccp_iterations", "soccp_energy", "penalty_energy"},
         rows);
     writeCsv(
         dir / "benchmark_engine_multicontact_summary.csv",
-        {"peak_soccp_penetration", "peak_penalty_penetration", "penetration_reduction", "peak_soccp_residual"},
+        {"peak_soccp_penetration", "peak_penalty_penetration", "penetration_reduction", "peak_soccp_residual", "max_soccp_iterations", "residual_exceed_steps"},
         {vectorToRow({
             peak_soccp_penetration,
             peak_penalty_penetration,
             penetration_reduction,
-            peak_soccp_residual
+            peak_soccp_residual,
+            max_soccp_iterations,
+            residual_exceed_steps
         })});
 
     std::cout << "benchmark_engine_multicontact.csv written to "

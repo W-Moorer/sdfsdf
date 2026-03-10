@@ -31,6 +31,7 @@ struct SOCCPProblem {
     Eigen::VectorXd g_eq;
     Eigen::VectorXd friction_coefficients;
     Eigen::VectorXd baumgarte_gamma;
+    Eigen::ArrayXi torsion_enabled;
     double time_step = 1.0;
     double epsilon = 1e-8;
 
@@ -60,6 +61,7 @@ struct SOCCPProblem {
                tangential_jacobian.cols() == nv &&
                friction_coefficients.size() == nc &&
                baumgarte_gamma.size() == nc &&
+               (torsion_enabled.size() == 0 || torsion_enabled.size() == nc) &&
                time_step > 0.0 &&
                epsilon > 0.0;
     }
@@ -89,11 +91,17 @@ public:
         : newton_(max_iterations, tolerance, epsilon) {}
 
     bool solve(const SOCCPProblem& problem, SOCCPSolution& solution) const {
+        return solve(problem, nullptr, solution);
+    }
+
+    bool solve(const SOCCPProblem& problem,
+               const Eigen::VectorXd* initial_state,
+               SOCCPSolution& solution) const {
         if (!problem.isValid()) {
             return false;
         }
 
-        Eigen::VectorXd state = initialGuess(problem);
+        Eigen::VectorXd state = initialGuess(problem, initial_state);
         auto residual_fn = [this, &problem](const Eigen::VectorXd& current_state) {
             return computeResidual(problem, current_state);
         };
@@ -135,13 +143,28 @@ public:
 
             const Eigen::Vector3d u_t =
                 problem.tangential_jacobian.block(3 * i, 0, 3, nv) * v;
-            const Vector4d x = makeFrictionConeVector(
-                problem.friction_coefficients(i),
-                lambda_n(i),
-                lambda_t.segment<3>(3 * i));
-            const Vector4d y = makeDualConeVector(slack(i), u_t);
+            const int row = socOffset(problem) + 4 * i;
+            if (torsionEnabled(problem, i)) {
+                const Vector4d x = makeFrictionConeVector(
+                    problem.friction_coefficients(i),
+                    lambda_n(i),
+                    lambda_t.segment<3>(3 * i));
+                const Vector4d y = makeDualConeVector(slack(i), u_t);
+                residual.segment<4>(row) = fischerBurmeister(x, y);
+            } else {
+                Vector4d x = Vector4d::Zero();
+                Vector4d y = Vector4d::Zero();
+                x(0) = problem.friction_coefficients(i) * lambda_n(i);
+                x(1) = lambda_t(3 * i + 0);
+                x(2) = lambda_t(3 * i + 1);
+                y(0) = slack(i);
+                y(1) = u_t(0);
+                y(2) = u_t(1);
 
-            residual.segment<4>(socOffset(problem) + 4 * i) = fischerBurmeister(x, y);
+                const Vector4d fb = fischerBurmeister(x, y);
+                residual.segment<3>(row) = fb.head<3>();
+                residual(row + 3) = lambda_t(3 * i + 2);
+            }
         }
 
         return residual;
@@ -178,25 +201,52 @@ public:
 
             const Eigen::Vector3d u_t =
                 problem.tangential_jacobian.block(3 * i, 0, 3, nv) * v;
-            const Vector4d x = makeFrictionConeVector(
-                problem.friction_coefficients(i),
-                lambda_n(i),
-                lambda_t.segment<3>(3 * i));
-            const Vector4d y = makeDualConeVector(slack(i), u_t);
-            const Eigen::Matrix<double, 4, 8> J_fb =
-                fischerBurmeisterJacobian(x, y, problem.epsilon);
-            const Eigen::Matrix4d dphi_dx = J_fb.block<4, 4>(0, 0);
-            const Eigen::Matrix4d dphi_dy = J_fb.block<4, 4>(0, 4);
-
             const int row = socOffset(problem) + 4 * i;
-            J.block(row, 0, 4, nv) =
-                dphi_dy.block<4, 3>(0, 1) *
-                problem.tangential_jacobian.block(3 * i, 0, 3, nv);
-            J.block(row, normalOffset(problem) + i, 4, 1) =
-                problem.friction_coefficients(i) * dphi_dx.col(0);
-            J.block(row, tangentOffset(problem) + 3 * i, 4, 3) =
-                dphi_dx.block<4, 3>(0, 1);
-            J.block(row, slackOffset(problem) + i, 4, 1) = dphi_dy.col(0);
+            if (torsionEnabled(problem, i)) {
+                const Vector4d x = makeFrictionConeVector(
+                    problem.friction_coefficients(i),
+                    lambda_n(i),
+                    lambda_t.segment<3>(3 * i));
+                const Vector4d y = makeDualConeVector(slack(i), u_t);
+                const Eigen::Matrix<double, 4, 8> J_fb =
+                    fischerBurmeisterJacobian(x, y, problem.epsilon);
+                const Eigen::Matrix4d dphi_dx = J_fb.block<4, 4>(0, 0);
+                const Eigen::Matrix4d dphi_dy = J_fb.block<4, 4>(0, 4);
+
+                J.block(row, 0, 4, nv) =
+                    dphi_dy.block<4, 3>(0, 1) *
+                    problem.tangential_jacobian.block(3 * i, 0, 3, nv);
+                J.block(row, normalOffset(problem) + i, 4, 1) =
+                    problem.friction_coefficients(i) * dphi_dx.col(0);
+                J.block(row, tangentOffset(problem) + 3 * i, 4, 3) =
+                    dphi_dx.block<4, 3>(0, 1);
+                J.block(row, slackOffset(problem) + i, 4, 1) = dphi_dy.col(0);
+            } else {
+                Vector4d x = Vector4d::Zero();
+                Vector4d y = Vector4d::Zero();
+                x(0) = problem.friction_coefficients(i) * lambda_n(i);
+                x(1) = lambda_t(3 * i + 0);
+                x(2) = lambda_t(3 * i + 1);
+                y(0) = slack(i);
+                y(1) = u_t(0);
+                y(2) = u_t(1);
+
+                const Eigen::Matrix<double, 4, 8> J_fb =
+                    fischerBurmeisterJacobian(x, y, problem.epsilon);
+                const Eigen::Matrix4d dphi_dx = J_fb.block<4, 4>(0, 0);
+                const Eigen::Matrix4d dphi_dy = J_fb.block<4, 4>(0, 4);
+
+                J.block(row, 0, 3, nv) =
+                    dphi_dy.block<3, 3>(0, 1) *
+                    problem.tangential_jacobian.block(3 * i, 0, 3, nv);
+                J.block(row, normalOffset(problem) + i, 3, 1) =
+                    problem.friction_coefficients(i) * dphi_dx.block<3, 1>(0, 0);
+                J.block(row, tangentOffset(problem) + 3 * i, 3, 2) =
+                    dphi_dx.block<3, 2>(0, 1);
+                J.block(row, slackOffset(problem) + i, 3, 1) =
+                    dphi_dy.block<3, 1>(0, 0);
+                J(row + 3, tangentOffset(problem) + 3 * i + 2) = 1.0;
+            }
         }
 
         return J;
@@ -237,6 +287,7 @@ public:
         problem.g_eq = Eigen::VectorXd::Zero(nc);
         problem.friction_coefficients = Eigen::VectorXd::Zero(nc);
         problem.baumgarte_gamma = Eigen::VectorXd::Zero(nc);
+        problem.torsion_enabled = Eigen::ArrayXi::Ones(nc);
         problem.time_step = time_step;
         problem.epsilon = epsilon;
 
@@ -299,9 +350,26 @@ private:
         return a + b - std::sqrt(a * a + b * b + epsilon * epsilon);
     }
 
-    static Eigen::VectorXd initialGuess(const SOCCPProblem& problem) {
+    static Eigen::VectorXd initialGuess(const SOCCPProblem& problem,
+                                        const Eigen::VectorXd* initial_state) {
         const int nv = problem.velocityDofs();
         const int nc = problem.numContacts();
+        if (initial_state != nullptr &&
+            initial_state->size() == problem.stateSize() &&
+            initial_state->allFinite()) {
+            Eigen::VectorXd state = *initial_state;
+            state.segment(normalOffset(problem), nc) =
+                state.segment(normalOffset(problem), nc).cwiseMax(0.0);
+            state.segment(slackOffset(problem), nc) =
+                state.segment(slackOffset(problem), nc).cwiseMax(problem.epsilon);
+            for (int i = 0; i < nc; ++i) {
+                if (!torsionEnabled(problem, i)) {
+                    state(tangentOffset(problem) + 3 * i + 2) = 0.0;
+                }
+            }
+            return state;
+        }
+
         Eigen::VectorXd state = Eigen::VectorXd::Zero(problem.stateSize());
         state.head(nv) = problem.free_velocity;
 
@@ -314,6 +382,9 @@ private:
                 problem.tangential_jacobian.block(3 * i, 0, 3, nv) * problem.free_velocity;
             state.segment<3>(tangentOffset(problem) + 3 * i).setZero();
             state(slackOffset(problem) + i) = std::max(problem.epsilon, u_t.norm());
+            if (!torsionEnabled(problem, i)) {
+                state(tangentOffset(problem) + 3 * i + 2) = 0.0;
+            }
         }
 
         return state;
@@ -329,6 +400,10 @@ private:
         solution.lambda_n = state.segment(normalOffset(problem), nc);
         solution.lambda_t = state.segment(tangentOffset(problem), 3 * nc);
         solution.slack = state.segment(slackOffset(problem), nc);
+    }
+
+    static bool torsionEnabled(const SOCCPProblem& problem, int contact_id) {
+        return problem.torsion_enabled.size() == 0 || problem.torsion_enabled(contact_id) != 0;
     }
 };
 

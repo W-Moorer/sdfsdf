@@ -434,6 +434,97 @@ bool testAABB() {
     return passed;
 }
 
+bool testEngineNormalLCPBaseline() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Engine Normal LCP Baseline Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    auto makeEngine = [](ContactSolverMode mode) {
+        SimulationConfig config;
+        config.time_step = 0.0025;
+        config.gravity = Eigen::Vector3d(0.0, -9.81, 0.0);
+        config.enable_friction = false;
+        config.enable_torsional_friction = false;
+        config.baumgarte_gamma = 0.0;
+        config.contact_grid_resolution = 48;
+        config.contact_p_norm = 2.0;
+        config.max_solver_iterations = 160;
+        config.solver_tolerance = 1e-8;
+        config.solver_mode = mode;
+        return SimulationEngine(config);
+    };
+
+    auto addSphereDropScene = [](SimulationEngine& engine, std::shared_ptr<RigidBody>& sphere_out) {
+        constexpr double radius = 0.20;
+        constexpr double sphere_mass = 1.0;
+        constexpr double support_width = 12.0;
+        constexpr double support_height = 2.0;
+        constexpr double support_depth = 12.0;
+
+        sphere_out = std::make_shared<RigidBody>(
+            RigidBodyProperties::sphere(sphere_mass, radius));
+        sphere_out->setPosition(Eigen::Vector3d(0.0, 2.0, 0.0));
+
+        auto support = std::make_shared<RigidBody>(
+            RigidBodyProperties::box(1.0, 1.0, 1.0, 1.0));
+        support->setStatic(true);
+        support->setPosition(Eigen::Vector3d(0.0, -0.5 * support_height, 0.0));
+
+        auto sphere_sdf = std::make_shared<SphereSDF>(Eigen::Vector3d::Zero(), radius);
+        auto support_sdf = std::make_shared<BoxSDF>(
+            Eigen::Vector3d(-0.5 * support_width, -0.5 * support_height, -0.5 * support_depth),
+            Eigen::Vector3d(0.5 * support_width, 0.5 * support_height, 0.5 * support_depth));
+
+        const AABB sphere_aabb(
+            Eigen::Vector3d::Constant(-radius),
+            Eigen::Vector3d::Constant(radius));
+        const AABB support_aabb(
+            Eigen::Vector3d(-0.5 * support_width, -0.5 * support_height, -0.5 * support_depth),
+            Eigen::Vector3d(0.5 * support_width, 0.5 * support_height, 0.5 * support_depth));
+
+        engine.addBody(sphere_out, sphere_sdf, sphere_aabb);
+        engine.addBody(support, support_sdf, support_aabb);
+    };
+
+    SimulationEngine soccp_engine = makeEngine(ContactSolverMode::SOCCP);
+    SimulationEngine normal_lcp_engine = makeEngine(ContactSolverMode::NormalLCP);
+    std::shared_ptr<RigidBody> soccp_sphere;
+    std::shared_ptr<RigidBody> normal_lcp_sphere;
+    addSphereDropScene(soccp_engine, soccp_sphere);
+    addSphereDropScene(normal_lcp_engine, normal_lcp_sphere);
+
+    constexpr int num_steps = 320;
+    double max_height_diff = 0.0;
+    double max_vy_diff = 0.0;
+
+    for (int step = 0; step < num_steps; ++step) {
+        soccp_engine.step();
+        normal_lcp_engine.step();
+        max_height_diff = std::max(
+            max_height_diff,
+            std::abs(soccp_sphere->position().y() - normal_lcp_sphere->position().y()));
+        max_vy_diff = std::max(
+            max_vy_diff,
+            std::abs(soccp_sphere->linearVelocity().y() - normal_lcp_sphere->linearVelocity().y()));
+    }
+
+    const double final_height_soccp = soccp_sphere->position().y();
+    const double final_height_normal_lcp = normal_lcp_sphere->position().y();
+    const double final_vy_soccp = soccp_sphere->linearVelocity().y();
+    const double final_vy_normal_lcp = normal_lcp_sphere->linearVelocity().y();
+
+    std::cout << "Final SOCCP height: " << final_height_soccp << std::endl;
+    std::cout << "Final normal LCP height: " << final_height_normal_lcp << std::endl;
+    std::cout << "Final SOCCP vy: " << final_vy_soccp << std::endl;
+    std::cout << "Final normal LCP vy: " << final_vy_normal_lcp << std::endl;
+    std::cout << "Max height difference: " << max_height_diff << std::endl;
+    std::cout << "Max vy difference: " << max_vy_diff << std::endl;
+
+    const bool passed = max_height_diff < 1e-5 && max_vy_diff < 1e-5;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 5 Acceptance Tests" << std::endl;
@@ -446,6 +537,7 @@ int main() {
     bool test5 = testScene3_FrictionSlider();
     bool test6 = testSpatialHash();
     bool test7 = testAABB();
+    bool test8 = testEngineNormalLCPBaseline();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 5 Acceptance Summary" << std::endl;
@@ -457,8 +549,9 @@ int main() {
     std::cout << "Scene 3 (Friction): " << (test5 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Spatial Hash: " << (test6 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "AABB: " << (test7 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Engine Normal LCP: " << (test8 ? "PASSED" : "FAILED") << std::endl;
 
-    bool all_passed = test1 && test2 && test3 && test4 && test5 && test6 && test7;
+    bool all_passed = test1 && test2 && test3 && test4 && test5 && test6 && test7 && test8;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;

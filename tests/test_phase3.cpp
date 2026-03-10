@@ -14,6 +14,7 @@
 #include "dynamics/ContactDynamics.h"
 #include "geometry/AnalyticalSDF.h"
 #include "geometry/VolumetricIntegrator.h"
+#include "solver/PenaltySolver.h"
 
 using namespace vde;
 
@@ -269,6 +270,72 @@ bool testIntegratedNormalJacobian() {
     return passed;
 }
 
+bool testPenaltyForceDirection() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Penalty Force Direction Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    constexpr double radius = 0.20;
+    constexpr double center_y = 0.10;
+
+    RigidBody sphere(RigidBodyProperties::sphere(1.0, radius));
+    sphere.setPosition(Eigen::Vector3d(0.0, center_y, 0.0));
+
+    RigidBody support(RigidBodyProperties::box(1.0, 10.0, 2.0, 10.0));
+    support.setPosition(Eigen::Vector3d(0.0, -1.0, 0.0));
+    support.setStatic(true);
+
+    const auto local_sphere = std::make_shared<SphereSDF>(Eigen::Vector3d::Zero(), radius);
+    const auto local_support = std::make_shared<BoxSDF>(
+        Eigen::Vector3d(-5.0, -1.0, -5.0),
+        Eigen::Vector3d(5.0, 1.0, 5.0));
+    const TransformedSDF sphere_sdf(
+        local_sphere, sphere.position(), Eigen::Quaterniond::Identity());
+    const TransformedSDF support_sdf(
+        local_support, support.position(), Eigen::Quaterniond::Identity());
+
+    const AABB sphere_aabb(
+        Eigen::Vector3d(-radius, center_y - radius, -radius),
+        Eigen::Vector3d(radius, center_y + radius, radius));
+    const AABB support_aabb(
+        Eigen::Vector3d(-5.0, -2.0, -5.0),
+        Eigen::Vector3d(5.0, 0.0, 5.0));
+
+    VolumetricIntegrator integrator(48, 2.0);
+    const ContactGeometry geometry = integrator.computeContactGeometry(
+        sphere_sdf, support_sdf, sphere_aabb, support_aabb);
+
+    ContactConstraint constraint;
+    constraint.computeJacobiansFromGeometry(
+        geometry,
+        sphere.centerOfMassWorld(),
+        support.centerOfMassWorld(),
+        1e-6);
+
+    PenaltyParameters params;
+    params.stiffness = 60000.0;
+    params.damping = 220.0;
+    params.friction_coefficient = 0.0;
+    PenaltySolver solver(params);
+    const PenaltyContactResult result =
+        solver.solveContactDetailed(sphere, support, constraint, 0.0025);
+
+    std::cout << "g_eq: " << geometry.g_eq << std::endl;
+    std::cout << "normal: " << constraint.contact.normal.transpose() << std::endl;
+    std::cout << "world_force: " << result.world_force.transpose() << std::endl;
+    std::cout << "sphere external force: " << sphere.externalForce().transpose() << std::endl;
+    std::cout << "support external force: " << support.externalForce().transpose() << std::endl;
+
+    const bool passed =
+        result.active &&
+        geometry.g_eq < 0.0 &&
+        result.world_force.dot(constraint.contact.normal) > 0.0 &&
+        sphere.externalForce().dot(constraint.contact.normal) > 0.0 &&
+        support.externalForce().dot(constraint.contact.normal) < 0.0;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 3 Acceptance Tests" << std::endl;
@@ -279,6 +346,7 @@ int main() {
     bool test3 = testRigidBodyIntegration();
     bool test4 = testMassMatrix();
     bool test5 = testIntegratedNormalJacobian();
+    bool test6 = testPenaltyForceDirection();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 3 Acceptance Summary" << std::endl;
@@ -288,8 +356,9 @@ int main() {
     std::cout << "Rigid Body Integration: " << (test3 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Mass Matrix: " << (test4 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Integrated Normal Jacobian: " << (test5 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Penalty Force Direction: " << (test6 ? "PASSED" : "FAILED") << std::endl;
 
-    bool all_passed = test1 && test2 && test3 && test4 && test5;
+    bool all_passed = test1 && test2 && test3 && test4 && test5 && test6;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;

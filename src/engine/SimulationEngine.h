@@ -10,6 +10,7 @@
 #include "dynamics/ContactDynamics.h"
 #include "geometry/AnalyticalSDF.h"
 #include "geometry/VolumetricIntegrator.h"
+#include "solver/NormalLCPSolver.h"
 #include "solver/SOCCPSolver.h"
 #include <array>
 #include <chrono>
@@ -77,6 +78,11 @@ struct SimulationStats {
 /**
  * @brief Simulation configuration
  */
+enum class ContactSolverMode {
+    SOCCP,
+    NormalLCP
+};
+
 struct SimulationConfig {
     double time_step = 0.001;
     double spatial_hash_cell_size = 1.0;
@@ -84,11 +90,13 @@ struct SimulationConfig {
     int max_solver_iterations = 50;
     double solver_tolerance = 1e-6;
     bool enable_friction = true;
+    bool enable_torsional_friction = true;
     double friction_coefficient = 0.5;
     double baumgarte_gamma = 0.5;
     int contact_grid_resolution = 24;
     double contact_p_norm = 2.0;
     double torsion_regularization = 1e-4;
+    ContactSolverMode solver_mode = ContactSolverMode::SOCCP;
     Eigen::Vector3d gravity = Eigen::Vector3d(0, -9.81, 0);
 
     SimulationConfig() = default;
@@ -159,6 +167,8 @@ public:
         bodies_.clear();
         shapes_.clear();
         contacts_.clear();
+        last_soccp_state_.resize(0);
+        last_normal_lcp_lambda_.resize(0);
         current_time_ = 0.0;
         step_count_ = 0;
     }
@@ -256,6 +266,8 @@ public:
         broad_phase_ = BroadPhaseDetector(config.spatial_hash_cell_size);
         integrator_.setGridResolution(config.contact_grid_resolution);
         integrator_.setPNorm(config.contact_p_norm);
+        last_soccp_state_.resize(0);
+        last_normal_lcp_lambda_.resize(0);
     }
 
 private:
@@ -265,6 +277,8 @@ private:
     std::vector<ContactPair> contacts_;
     BroadPhaseDetector broad_phase_;
     VolumetricIntegrator integrator_;
+    Eigen::VectorXd last_soccp_state_;
+    Eigen::VectorXd last_normal_lcp_lambda_;
     double current_time_;
     int step_count_;
 
@@ -394,6 +408,8 @@ private:
         }
 
         if (active_body_ids.empty()) {
+            last_soccp_state_.resize(0);
+            last_normal_lcp_lambda_.resize(0);
             stats.solver_iterations = 0;
             stats.solver_residual = 0.0;
             return;
@@ -412,19 +428,16 @@ private:
 
         Eigen::VectorXd solved_velocity = global_free_velocity;
         SOCCPSolution solution;
+        NormalLCPSolution normal_lcp_solution;
 
         if (!contacts_.empty()) {
             const int nc = static_cast<int>(contacts_.size());
-            SOCCPProblem problem;
-            problem.mass_matrix = mass_matrix;
-            problem.free_velocity = global_free_velocity;
-            problem.normal_jacobian = Eigen::MatrixXd::Zero(nc, nv);
-            problem.tangential_jacobian = Eigen::MatrixXd::Zero(3 * nc, nv);
-            problem.g_eq = Eigen::VectorXd::Zero(nc);
-            problem.friction_coefficients = Eigen::VectorXd::Zero(nc);
-            problem.baumgarte_gamma = Eigen::VectorXd::Zero(nc);
-            problem.time_step = config_.time_step;
-            problem.epsilon = 1e-8;
+            Eigen::MatrixXd normal_jacobian = Eigen::MatrixXd::Zero(nc, nv);
+            Eigen::MatrixXd tangential_jacobian = Eigen::MatrixXd::Zero(3 * nc, nv);
+            Eigen::VectorXd g_eq = Eigen::VectorXd::Zero(nc);
+            Eigen::VectorXd friction_coefficients = Eigen::VectorXd::Zero(nc);
+            Eigen::VectorXd baumgarte_gamma = Eigen::VectorXd::Zero(nc);
+            Eigen::ArrayXi torsion_enabled = Eigen::ArrayXi::Zero(nc);
 
             for (int contact_id = 0; contact_id < nc; ++contact_id) {
                 const ContactPair& pair = contacts_[contact_id];
@@ -474,30 +487,95 @@ private:
                     reduced_tangent.block(0, offset, 3, 6) = constraint.tangentialJacobian().block<3, 6>(0, 6);
                 }
 
-                problem.normal_jacobian.row(contact_id) = reduced_normal;
-                problem.tangential_jacobian.block(3 * contact_id, 0, 3, nv) = reduced_tangent;
-                problem.g_eq(contact_id) = pair.geometry.g_eq;
-                problem.friction_coefficients(contact_id) =
+                if (!config_.enable_torsional_friction) {
+                    reduced_tangent.row(2).setZero();
+                }
+
+                normal_jacobian.row(contact_id) = reduced_normal;
+                tangential_jacobian.block(3 * contact_id, 0, 3, nv) = reduced_tangent;
+                g_eq(contact_id) = pair.geometry.g_eq;
+                friction_coefficients(contact_id) =
                     config_.enable_friction ? config_.friction_coefficient : 0.0;
-                problem.baumgarte_gamma(contact_id) = config_.baumgarte_gamma;
+                baumgarte_gamma(contact_id) = config_.baumgarte_gamma;
+                torsion_enabled(contact_id) = config_.enable_torsional_friction ? 1 : 0;
             }
 
-            SOCCPSolver solver(
-                config_.max_solver_iterations,
-                config_.solver_tolerance,
-                problem.epsilon);
-            const bool converged = solver.solve(problem, solution);
+            if (config_.solver_mode == ContactSolverMode::NormalLCP) {
+                last_soccp_state_.resize(0);
+                NormalLCPProblem problem;
+                problem.mass_matrix = mass_matrix;
+                problem.free_velocity = global_free_velocity;
+                problem.normal_jacobian = normal_jacobian;
+                problem.g_eq = g_eq;
+                problem.baumgarte_gamma = baumgarte_gamma;
+                problem.time_step = config_.time_step;
 
-            if (converged) {
-                solved_velocity = solution.velocity;
+                NormalLCPSolver solver(
+                    config_.max_solver_iterations,
+                    config_.solver_tolerance,
+                    1.0);
+                const Eigen::VectorXd* initial_lambda =
+                    (last_normal_lcp_lambda_.size() == nc) ? &last_normal_lcp_lambda_ : nullptr;
+                const bool converged = solver.solve(problem, initial_lambda, normal_lcp_solution);
+
+                if (normal_lcp_solution.lambda_n.size() == nc &&
+                    normal_lcp_solution.lambda_n.allFinite()) {
+                    last_normal_lcp_lambda_ = normal_lcp_solution.lambda_n;
+                } else {
+                    last_normal_lcp_lambda_.resize(0);
+                }
+
+                if (normal_lcp_solution.velocity.size() == nv &&
+                    normal_lcp_solution.velocity.allFinite()) {
+                    solved_velocity = normal_lcp_solution.velocity;
+                }
+
+                stats.solver_iterations = normal_lcp_solution.stats.iterations;
+                stats.solver_residual =
+                    normal_lcp_solution.residual.size() > 0
+                        ? normal_lcp_solution.residual.lpNorm<Eigen::Infinity>()
+                        : (converged ? 0.0 : std::numeric_limits<double>::infinity());
+            } else {
+                last_normal_lcp_lambda_.resize(0);
+                SOCCPProblem problem;
+                problem.mass_matrix = mass_matrix;
+                problem.free_velocity = global_free_velocity;
+                problem.normal_jacobian = normal_jacobian;
+                problem.tangential_jacobian = tangential_jacobian;
+                problem.g_eq = g_eq;
+                problem.friction_coefficients = friction_coefficients;
+                problem.baumgarte_gamma = baumgarte_gamma;
+                problem.torsion_enabled = torsion_enabled;
+                problem.time_step = config_.time_step;
+                problem.epsilon = 1e-8;
+
+                SOCCPSolver solver(
+                    config_.max_solver_iterations,
+                    config_.solver_tolerance,
+                    problem.epsilon);
+                const Eigen::VectorXd* initial_state =
+                    (last_soccp_state_.size() == problem.stateSize()) ? &last_soccp_state_ : nullptr;
+                const bool converged = solver.solve(problem, initial_state, solution);
+
+                if (solution.state.size() == problem.stateSize() && solution.state.allFinite()) {
+                    last_soccp_state_ = solution.state;
+                } else {
+                    last_soccp_state_.resize(0);
+                }
+
+                if (solution.velocity.size() == nv && solution.velocity.allFinite()) {
+                    solved_velocity = solution.velocity;
+                }
+
+                stats.solver_iterations = solution.stats.iterations;
+                stats.solver_residual =
+                    solution.residual.size() > 0
+                        ? solution.residual.lpNorm<Eigen::Infinity>()
+                        : (converged ? 0.0 : std::numeric_limits<double>::infinity());
             }
-
-            stats.solver_iterations = solution.stats.iterations;
-            stats.solver_residual =
-                solution.residual.size() > 0
-                    ? solution.residual.lpNorm<Eigen::Infinity>()
-                    : (converged ? 0.0 : std::numeric_limits<double>::infinity());
         } else {
+            last_soccp_state_.resize(0);
+            last_normal_lcp_lambda_.resize(0);
             stats.solver_iterations = 0;
             stats.solver_residual = 0.0;
         }

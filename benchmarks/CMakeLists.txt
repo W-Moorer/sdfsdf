@@ -4,6 +4,9 @@ set(VDE_BENCHMARK_SOURCES
     benchmark_mass_ratio_stack.cpp
     benchmark_resolution_convergence.cpp
     benchmark_engine_multicontact.cpp
+    benchmark_engine_tripod_landing.cpp
+    benchmark_engine_torsion_compare.cpp
+    benchmark_sphere_drop_compare.cpp
 )
 
 foreach(source_file IN LISTS VDE_BENCHMARK_SOURCES)

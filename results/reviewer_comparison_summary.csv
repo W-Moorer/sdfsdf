@@ -1,0 +1,7 @@
+case,comparison,primary_metric,secondary_metric,takeaway
+Case 1,torsion radius vs theory + point baseline,radius error=4.00%; stop-time error=3.85%,point baseline final spin=10.00 rad/s,finite-contact torsion scale is necessary and quantitatively calibrated
+Case 2,full-engine 4D friction vs 3D torsion-free baseline,final spin=1.58e-05 vs 2.19 rad/s,residual spin reduction=99.999%,torsional impulse changes the full-engine dynamics
+Case 3,p-sensitivity + resolution dependence,"final -g_eq gain=14.8% (p=4), 23.0% (p=6)","64^3 gap error=8.15% (p=2), 29.7% (p=6)",current numerical claim is scoped to p=2..4; p=6 is retained only as a trend demonstration
+Case 4,full-engine SOCCP vs penalty baseline,peak penetration reduced by 70.1%,peak residual=2.89e-01; max Newton iters=17,SOCCP reduces penetration with stable iterative cost on the two-contact scene
+Case 5,controlled mass-ratio robustness sweep,mass ratio 1 to 1000 all converged,max Newton iters=6; max residual inf-norm=0.0e+00,the SOCCP core remains locally robust under controlled ill-conditioning
+Case 6,3D tripod landing: SOCCP vs penalty baseline,peak penetration reduced by 81.7%,final tilt=20.5 vs 96.7 deg,SOCCP maintains support stability in a stronger 3D multi-contact scene
