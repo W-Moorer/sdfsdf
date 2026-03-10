@@ -8,6 +8,8 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <limits>
@@ -130,8 +132,11 @@ public:
         double d_norm = d.norm();
         Eigen::Vector3d max_dist = min_corner_ - x;
         Eigen::Vector3d max_dist2 = x - max_corner_;
-        double inside_dist = std::max({max_dist.maxCoeff(), max_dist2.maxCoeff(), 0.0});
-        return d_norm + inside_dist;
+        double inside_dist = std::max(max_dist.maxCoeff(), max_dist2.maxCoeff());
+        if (d_norm > 1e-12) {
+            return d_norm;
+        }
+        return inside_dist;
     }
 
     Eigen::Vector3d gradient(const Eigen::Vector3d& x) const override {
@@ -256,6 +261,207 @@ public:
 private:
     Eigen::Vector3d normal_;
     Eigen::Vector3d point_on_plane_;
+};
+
+/**
+ * @brief Finite cylinder aligned with the local Y axis
+ */
+class CylinderSDF : public SDF {
+public:
+    CylinderSDF(double radius, double height)
+        : radius_(radius), height_(height) {
+        if (radius <= 0.0 || height <= 0.0) {
+            throw std::invalid_argument("Cylinder dimensions must be positive");
+        }
+    }
+
+    double phi(const Eigen::Vector3d& x) const override {
+        const Eigen::Vector2d d(
+            Eigen::Vector2d(x.x(), x.z()).norm() - radius_,
+            std::abs(x.y()) - 0.5 * height_);
+
+        const Eigen::Vector2d d_out = d.cwiseMax(0.0);
+        return d_out.norm() + std::min(std::max(d.x(), d.y()), 0.0);
+    }
+
+    Eigen::Vector3d gradient(const Eigen::Vector3d& x) const override {
+        return finiteDifferenceGradient(x);
+    }
+
+    void phiAndGradient(const Eigen::Vector3d& x,
+                        double& out_phi,
+                        Eigen::Vector3d& out_grad) const override {
+        out_phi = phi(x);
+        out_grad = finiteDifferenceGradient(x);
+    }
+
+    double radius() const { return radius_; }
+    double height() const { return height_; }
+
+private:
+    double radius_;
+    double height_;
+
+    Eigen::Vector3d finiteDifferenceGradient(const Eigen::Vector3d& x) const {
+        constexpr double h = 1e-6;
+        Eigen::Vector3d grad;
+        for (int axis = 0; axis < 3; ++axis) {
+            Eigen::Vector3d x_plus = x;
+            Eigen::Vector3d x_minus = x;
+            x_plus(axis) += h;
+            x_minus(axis) -= h;
+            grad(axis) = (phi(x_plus) - phi(x_minus)) / (2.0 * h);
+        }
+
+        const double norm = grad.norm();
+        if (norm < 1e-12) {
+            return Eigen::Vector3d::UnitY();
+        }
+        return grad / norm;
+    }
+};
+
+/**
+ * @brief Right circular cone aligned with local Y axis
+ *
+ * The cone center is at the midpoint of the height, apex at +height/2,
+ * base at -height/2.
+ */
+class ConeSDF : public SDF {
+public:
+    ConeSDF(double base_radius, double height)
+        : base_radius_(base_radius), height_(height) {
+        if (base_radius <= 0.0 || height <= 0.0) {
+            throw std::invalid_argument("Cone dimensions must be positive");
+        }
+    }
+
+    double phi(const Eigen::Vector3d& x) const override {
+        const double half_height = 0.5 * height_;
+        const double y_apex = half_height;
+        const double y_base = -half_height;
+        const double radial = Eigen::Vector2d(x.x(), x.z()).norm();
+
+        if (x.y() > y_apex) {
+            return std::sqrt(radial * radial + (x.y() - y_apex) * (x.y() - y_apex));
+        }
+        if (x.y() < y_base) {
+            const double dr = std::max(0.0, radial - base_radius_);
+            return std::sqrt(dr * dr + (y_base - x.y()) * (y_base - x.y()));
+        }
+
+        const double t = (y_apex - x.y()) / height_;
+        const double radius_at_y = base_radius_ * t;
+        const double side_distance = radial - radius_at_y;
+
+        if (radial <= radius_at_y) {
+            const double distance_to_side = -sideDistance(x);
+            const double distance_to_apex = y_apex - x.y();
+            const double distance_to_base = x.y() - y_base;
+            return -std::min({distance_to_side, distance_to_apex, distance_to_base});
+        }
+
+        return sideDistance(x);
+    }
+
+    Eigen::Vector3d gradient(const Eigen::Vector3d& x) const override {
+        return finiteDifferenceGradient(x);
+    }
+
+    void phiAndGradient(const Eigen::Vector3d& x,
+                        double& out_phi,
+                        Eigen::Vector3d& out_grad) const override {
+        out_phi = phi(x);
+        out_grad = finiteDifferenceGradient(x);
+    }
+
+    double baseRadius() const { return base_radius_; }
+    double height() const { return height_; }
+
+private:
+    double base_radius_;
+    double height_;
+
+    double sideDistance(const Eigen::Vector3d& x) const {
+        const double radial = Eigen::Vector2d(x.x(), x.z()).norm();
+        const double k = base_radius_ / height_;
+        return (radial + k * (x.y() - 0.5 * height_)) / std::sqrt(1.0 + k * k);
+    }
+
+    Eigen::Vector3d finiteDifferenceGradient(const Eigen::Vector3d& x) const {
+        constexpr double h = 1e-6;
+        Eigen::Vector3d grad;
+        for (int axis = 0; axis < 3; ++axis) {
+            Eigen::Vector3d x_plus = x;
+            Eigen::Vector3d x_minus = x;
+            x_plus(axis) += h;
+            x_minus(axis) -= h;
+            grad(axis) = (phi(x_plus) - phi(x_minus)) / (2.0 * h);
+        }
+
+        const double norm = grad.norm();
+        if (norm < 1e-12) {
+            return Eigen::Vector3d::UnitY();
+        }
+        return grad / norm;
+    }
+};
+
+/**
+ * @brief World-space wrapper for a local analytical SDF
+ *
+ * Implements phi(x; q) by transforming world-space queries back to
+ * the body's local frame.
+ */
+class TransformedSDF : public SDF {
+public:
+    TransformedSDF(std::shared_ptr<const SDF> local_sdf,
+                   const Eigen::Vector3d& position,
+                   const Eigen::Quaterniond& orientation)
+        : local_sdf_(std::move(local_sdf)),
+          position_(position),
+          orientation_(orientation.normalized()) {
+        if (!local_sdf_) {
+            throw std::invalid_argument("TransformedSDF requires a valid local SDF");
+        }
+    }
+
+    double phi(const Eigen::Vector3d& x) const override {
+        return local_sdf_->phi(worldToLocal(x));
+    }
+
+    Eigen::Vector3d gradient(const Eigen::Vector3d& x) const override {
+        const Eigen::Vector3d local_grad = local_sdf_->gradient(worldToLocal(x));
+        const Eigen::Vector3d world_grad = orientation_ * local_grad;
+        const double norm = world_grad.norm();
+        if (norm < 1e-12) {
+            return Eigen::Vector3d::UnitY();
+        }
+        return world_grad / norm;
+    }
+
+    void phiAndGradient(const Eigen::Vector3d& x,
+                        double& out_phi,
+                        Eigen::Vector3d& out_grad) const override {
+        Eigen::Vector3d local_grad = Eigen::Vector3d::Zero();
+        local_sdf_->phiAndGradient(worldToLocal(x), out_phi, local_grad);
+        out_grad = orientation_ * local_grad;
+        const double norm = out_grad.norm();
+        if (norm < 1e-12) {
+            out_grad = Eigen::Vector3d::UnitY();
+        } else {
+            out_grad /= norm;
+        }
+    }
+
+private:
+    std::shared_ptr<const SDF> local_sdf_;
+    Eigen::Vector3d position_;
+    Eigen::Quaterniond orientation_;
+
+    Eigen::Vector3d worldToLocal(const Eigen::Vector3d& x) const {
+        return orientation_.conjugate() * (x - position_);
+    }
 };
 
 }  // namespace vde

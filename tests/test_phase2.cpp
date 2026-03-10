@@ -10,11 +10,55 @@
 #include <iostream>
 #include <cmath>
 #include <iomanip>
+#include <algorithm>
+#include <Eigen/Dense>
 #include "math/JordanAlgebra.h"
 #include "math/FischerBurmeister.h"
+#include "dynamics/ContactDynamics.h"
 #include "solver/SemiSmoothNewton.h"
+#include "solver/SOCCPSolver.h"
 
 using namespace vde;
+
+SOCCPProblem makeReferenceSOCCPProblem() {
+    ContactConstraint constraint;
+    constraint.contact.position = Eigen::Vector3d::Zero();
+    constraint.contact.normal = Eigen::Vector3d::UnitY();
+    constraint.contact.computeTangentDirections();
+    constraint.g_eq = -0.02;
+    constraint.r_tau = 0.15;
+    constraint.computeJacobians(Eigen::Vector3d(0.0, -0.5, 0.0),
+                                Eigen::Vector3d(0.0, 0.5, 0.0));
+
+    Eigen::MatrixXd mass_matrix = Eigen::MatrixXd::Identity(12, 12);
+    mass_matrix.block<3, 3>(3, 3) = 0.25 * Eigen::Matrix3d::Identity();
+    mass_matrix.block<3, 3>(9, 9) = 0.4 * Eigen::Matrix3d::Identity();
+
+    Eigen::VectorXd free_velocity = Eigen::VectorXd::Zero(12);
+    free_velocity(0) = 0.30;
+    free_velocity(6) = -0.05;
+
+    return SOCCPSolver::fromConstraint(
+        mass_matrix, free_velocity, constraint, 1e-2, 0.5, 0.5, 1e-8);
+}
+
+Eigen::VectorXd makeReferenceState(const SOCCPProblem& problem) {
+    const int nv = problem.velocityDofs();
+    const int nc = problem.numContacts();
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(problem.stateSize());
+    state.head(nv) = problem.free_velocity;
+
+    const double u_n =
+        (problem.normal_jacobian.row(0) * problem.free_velocity)(0)
+        + (problem.baumgarte_gamma(0) / problem.time_step) * problem.g_eq(0);
+    state.segment(nv, nc).setZero();
+    state.segment(nv + nc, 3 * nc).setZero();
+    state(nv) = std::max(0.0, -u_n);
+    state(nv + 4 * nc) =
+        std::max(problem.epsilon, (problem.tangential_jacobian * problem.free_velocity).norm());
+
+    return state;
+}
 
 /**
  * @brief Acceptance criterion 1: FB Zero Theorem
@@ -315,6 +359,89 @@ bool testJacobianCorrectness() {
     return passed;
 }
 
+bool testSOCCPAssemblyJacobian() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "SOCCP Assembly Jacobian Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    const SOCCPProblem problem = makeReferenceSOCCPProblem();
+    SOCCPSolver solver(80, 1e-12, problem.epsilon);
+    Eigen::VectorXd state = makeReferenceState(problem);
+
+    const Eigen::MatrixXd J_analytical = solver.computeJacobian(problem, state);
+    Eigen::MatrixXd J_numerical = Eigen::MatrixXd::Zero(J_analytical.rows(), J_analytical.cols());
+
+    const double h = 1e-6;
+    for (int i = 0; i < state.size(); ++i) {
+        Eigen::VectorXd state_plus = state;
+        Eigen::VectorXd state_minus = state;
+        state_plus(i) += h;
+        state_minus(i) -= h;
+
+        const Eigen::VectorXd residual_plus = solver.computeResidual(problem, state_plus);
+        const Eigen::VectorXd residual_minus = solver.computeResidual(problem, state_minus);
+        J_numerical.col(i) = (residual_plus - residual_minus) / (2.0 * h);
+    }
+
+    const double abs_error = (J_analytical - J_numerical).norm();
+    const double rel_error = abs_error / std::max(1.0, J_numerical.norm());
+    const bool passed = rel_error < 1e-4;
+
+    std::cout << "Analytical Jacobian norm: " << J_analytical.norm() << std::endl;
+    std::cout << "Numerical Jacobian norm: " << J_numerical.norm() << std::endl;
+    std::cout << "Absolute error: " << abs_error << std::endl;
+    std::cout << "Relative error: " << rel_error << std::endl;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+
+    return passed;
+}
+
+bool testSOCCPSolverCore() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "SOCCP Core Solve Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    const SOCCPProblem problem = makeReferenceSOCCPProblem();
+    SOCCPSolver solver(100, 1e-10, problem.epsilon);
+    SOCCPSolution solution;
+
+    const bool converged = solver.solve(problem, solution);
+    const Eigen::Vector3d tangential_velocity =
+        problem.tangential_jacobian * solution.velocity;
+    const Vector4d friction_multiplier = SOCCPSolver::makeFrictionConeVector(
+        problem.friction_coefficients(0),
+        solution.lambda_n(0),
+        solution.lambda_t.segment<3>(0));
+    const Vector4d dual_velocity =
+        SOCCPSolver::makeDualConeVector(solution.slack(0), tangential_velocity);
+
+    const bool primal_soc = SOCCPSolver::isInsideSOC(friction_multiplier, 1e-8);
+    const bool dual_soc = SOCCPSolver::isInsideSOC(dual_velocity, 1e-8);
+    const double residual_inf = solution.residual.lpNorm<Eigen::Infinity>();
+    const double fb_inf = fischerBurmeister(friction_multiplier, dual_velocity).lpNorm<Eigen::Infinity>();
+
+    std::cout << "Converged: " << (converged ? "YES" : "NO") << std::endl;
+    std::cout << "Iterations: " << solution.stats.iterations << std::endl;
+    std::cout << "Residual inf-norm: " << residual_inf << std::endl;
+    std::cout << "lambda_n: " << solution.lambda_n(0) << std::endl;
+    std::cout << "||lambda_t||: " << solution.lambda_t.segment<3>(0).norm() << std::endl;
+    std::cout << "slack: " << solution.slack(0) << std::endl;
+    std::cout << "Primal SOC feasible: " << (primal_soc ? "YES" : "NO") << std::endl;
+    std::cout << "Dual SOC feasible: " << (dual_soc ? "YES" : "NO") << std::endl;
+    std::cout << "FB block inf-norm: " << fb_inf << std::endl;
+
+    const bool passed =
+        converged &&
+        solution.lambda_n(0) >= -1e-8 &&
+        primal_soc &&
+        dual_soc &&
+        residual_inf < 1e-7 &&
+        fb_inf < 1e-7;
+
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 2 Acceptance Tests" << std::endl;
@@ -322,18 +449,28 @@ int main() {
 
     bool jordan_test = testJordanAlgebra();
     bool jacobian_test = testJacobianCorrectness();
+    bool soccp_jacobian_test = testSOCCPAssemblyJacobian();
     bool criterion1 = testCriterion1_FBZeroTheorem();
     bool criterion2 = testCriterion2_QuadraticConvergence();
+    bool soccp_solver_test = testSOCCPSolverCore();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 2 Acceptance Summary" << std::endl;
     std::cout << "****************************************" << std::endl;
     std::cout << "Jordan Algebra: " << (jordan_test ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Jacobian Correctness: " << (jacobian_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "SOCCP Jacobian: " << (soccp_jacobian_test ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Criterion 1 (FB Zero Theorem): " << (criterion1 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Criterion 2 (Quadratic Convergence): " << (criterion2 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "SOCCP Core Solve: " << (soccp_solver_test ? "PASSED" : "FAILED") << std::endl;
 
-    bool all_passed = jordan_test && jacobian_test && criterion1 && criterion2;
+    bool all_passed =
+        jordan_test &&
+        jacobian_test &&
+        soccp_jacobian_test &&
+        criterion1 &&
+        criterion2 &&
+        soccp_solver_test;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;

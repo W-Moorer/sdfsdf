@@ -11,6 +11,7 @@
 #include "dynamics/RigidBody.h"
 #include "dynamics/ContactDynamics.h"
 #include "geometry/VolumetricIntegrator.h"
+#include <cmath>
 #include <vector>
 #include <memory>
 
@@ -112,6 +113,8 @@ public:
     void setParameters(const PenaltyParameters& params) { params_ = params; }
 
 private:
+    static constexpr double kPi = 3.14159265358979323846;
+
     PenaltyParameters params_;
 
     /**
@@ -120,7 +123,7 @@ private:
     double estimateContactArea(const ContactConstraint& contact) const {
         // Simplified: use r_tau to estimate area
         // Area ~ pi * r_tau^2 for circular contact
-        return M_PI * contact.r_tau * contact.r_tau;
+        return kPi * contact.r_tau * contact.r_tau;
     }
 };
 

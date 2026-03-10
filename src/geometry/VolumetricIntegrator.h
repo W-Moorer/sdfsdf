@@ -2,8 +2,9 @@
  * @file VolumetricIntegrator.h
  * @brief Shape-aware volumetric integrator
  *
- * Uniform grid sampler based on AABB intersection, computes Lp-norm penetration depth integral
- * Outputs equivalent gap g_eq, torsion inertia radius r_tau, equivalent contact normal n_c, and contact center p_c
+ * Uniform grid sampler based on AABB intersection.
+ * Computes the matrix-ratio equivalent gap and unified weighted contact geometry
+ * described in the paper draft.
  */
 
 #pragma once
@@ -29,7 +30,16 @@ struct ContactGeometry {
     Eigen::Vector3d n_c;            ///< Equivalent contact normal (unit vector)
     Eigen::Vector3d p_c;            ///< Contact center
     double volume;                  ///< Overlap volume
-    Eigen::Vector3d weighted_centroid;  ///< Weighted centroid (used to compute contact center)
+    double moment_p;                ///< I_p = integral delta^p dV
+    double moment_pm1;              ///< I_{p-1} = integral delta^(p-1) dV
+    double p_norm;                  ///< Shape-sensitivity exponent p
+    double cell_volume;             ///< Cell volume used by the discrete quadrature
+    Eigen::Vector3d weighted_centroid;  ///< Weighted centroid under the contact weights
+    std::vector<Eigen::Vector3d> sample_positions;   ///< Sample positions in overlap region
+    std::vector<Eigen::Vector3d> sample_gradients;   ///< Active branch gradients of delta
+    std::vector<double> sample_depths;               ///< Local overlap depth delta
+    std::vector<double> sample_weights;              ///< Discrete weights delta^(p-1) dV
+    std::vector<int> sample_active_body;             ///< 0 for body A active branch, 1 for body B
 
     ContactGeometry()
         : g_eq(0.0),
@@ -37,6 +47,10 @@ struct ContactGeometry {
           n_c(Eigen::Vector3d::UnitY()),
           p_c(Eigen::Vector3d::Zero()),
           volume(0.0),
+          moment_p(0.0),
+          moment_pm1(0.0),
+          p_norm(2.0),
+          cell_volume(0.0),
           weighted_centroid(Eigen::Vector3d::Zero()) {}
 };
 
@@ -68,7 +82,8 @@ public:
     /**
      * @brief Compute contact geometry features between two SDFs
      *
-     * Performs volumetric integration in overlap region to compute equivalent gap, torsion radius, contact normal and center
+     * Performs volumetric integration in the overlap region to compute
+     * the equivalent gap, torsion radius, contact normal and contact center.
      *
      * @param sdf_a First SDF (object A)
      * @param sdf_b Second SDF (object B)
@@ -119,17 +134,19 @@ public:
         double dz = region_size.z() / (grid_resolution_ - 1);
 
         cell_volume = dx * dy * dz;
+        result.cell_volume = cell_volume;
+        result.p_norm = p_norm_;
 
-        // Variables for accumulating integrals
-        double integral_phi_p = 0.0;        // integral phi^p dV
-        double integral_weight = 0.0;       // Weight integral for normalization
-        Eigen::Vector3d integral_position(0, 0, 0);  // For computing contact center
-        Eigen::Vector3d integral_normal(0, 0, 0);    // For computing equivalent normal
+        // Variables for accumulating the discrete moments used in the
+        // matrix-ratio gap and unified contact weights.
+        double overlap_volume = 0.0;
+        double integral_moment_p = 0.0;     // I_p = integral delta^p dV
+        double integral_moment_pm1 = 0.0;   // I_{p-1} = integral delta^(p-1) dV
+        Eigen::Vector3d integral_position(0, 0, 0);
+        Eigen::Vector3d integral_normal(0, 0, 0);
+        Eigen::Vector3d integral_orientation(0, 0, 0);
 
-        // Sample point weights (for Lp-norm)
-        std::vector<double> phi_samples;
         std::vector<Eigen::Vector3d> position_samples;
-        std::vector<Eigen::Vector3d> normal_samples;
         std::vector<double> weight_samples;
 
         // Traverse grid
@@ -143,78 +160,79 @@ public:
                         region.min.z() + k * dz
                     );
 
-                    // Compute SDF values for both objects
-                    double phi_a = sdf_a.phi(x);
-                    double phi_b = sdf_b.phi(x);
-
-                    // Compute penetration depth (negative when both objects are inside)
-                    // Penetration depth = max(-phi_a, -phi_b, 0) in some combination
-                    // Here we use volume overlap approach: overlap region when both SDFs are negative
+                    double phi_a = 0.0;
+                    double phi_b = 0.0;
+                    Eigen::Vector3d grad_a = Eigen::Vector3d::Zero();
+                    Eigen::Vector3d grad_b = Eigen::Vector3d::Zero();
+                    sdf_a.phiAndGradient(x, phi_a, grad_a);
+                    sdf_b.phiAndGradient(x, phi_b, grad_b);
 
                     if (phi_a < 0 && phi_b < 0) {
-                        // In overlap region
-                        double penetration_a = -phi_a;  // Object A penetration depth
-                        double penetration_b = -phi_b;  // Object B penetration depth
+                        overlap_volume += cell_volume;
 
-                        // Use smaller penetration depth as effective penetration (conservative estimate)
+                        double penetration_a = -phi_a;
+                        double penetration_b = -phi_b;
                         double effective_penetration = std::min(penetration_a, penetration_b);
-
-                        // Accumulate Lp-norm integral
-                        if (p_norm_ > 0) {
-                            integral_phi_p += std::pow(effective_penetration, p_norm_) * cell_volume;
+                        if (effective_penetration <= 0.0) {
+                            continue;
                         }
 
-                        // Accumulate weight and position
-                        double weight = effective_penetration * cell_volume;
-                        integral_weight += weight;
+                        integral_moment_p += std::pow(effective_penetration, p_norm_) * cell_volume;
+
+                        // All compressed contact quantities use the same weight
+                        // w_p ~ delta^(p-1).
+                        double weight = std::pow(effective_penetration, p_norm_ - 1.0) * cell_volume;
+                        integral_moment_pm1 += weight;
                         integral_position += x * weight;
 
-                        // Compute normal (combination of two gradients)
-                        Eigen::Vector3d grad_a = sdf_a.gradient(x);
-                        Eigen::Vector3d grad_b = sdf_b.gradient(x);
-
-                        // Contact normal is combination of two surface normals
-                        // For object A contacting object B, normal direction is from A to B
-                        Eigen::Vector3d contact_normal = (grad_b - grad_a).normalized();
-                        if (contact_normal.norm() < 1e-10) {
-                            contact_normal = Eigen::Vector3d(0, 1, 0);
+                        const bool active_body_a = penetration_a <= penetration_b;
+                        Eigen::Vector3d grad_delta =
+                            active_body_a ? (-grad_a) : (-grad_b);
+                        const int active_body = active_body_a ? 0 : 1;
+                        if (grad_delta.norm() < 1e-10) {
+                            grad_delta = Eigen::Vector3d(0, 1, 0);
+                        } else {
+                            grad_delta.normalize();
                         }
 
-                        integral_normal += contact_normal * weight;
+                        integral_normal += grad_delta * weight;
+                        Eigen::Vector3d orientation_normal = grad_b - grad_a;
+                        if (orientation_normal.norm() > 1e-10) {
+                            integral_orientation += orientation_normal.normalized() * weight;
+                        }
 
-                        // Store samples for subsequent torsion radius computation
-                        phi_samples.push_back(effective_penetration);
                         position_samples.push_back(x);
-                        normal_samples.push_back(contact_normal);
                         weight_samples.push_back(weight);
+                        result.sample_positions.push_back(x);
+                        result.sample_gradients.push_back(grad_delta);
+                        result.sample_depths.push_back(effective_penetration);
+                        result.sample_weights.push_back(weight);
+                        result.sample_active_body.push_back(active_body);
                     }
                 }
             }
         }
 
         // Compute results
-        if (integral_weight > 1e-15) {
-            // Equivalent gap (Lp-norm)
-            if (integral_phi_p > 0 && p_norm_ > 0) {
-                result.g_eq = -std::pow(integral_phi_p, 1.0 / p_norm_);
-            } else {
-                result.g_eq = 0.0;
-            }
+        result.volume = overlap_volume;
+        result.moment_p = integral_moment_p;
+        result.moment_pm1 = integral_moment_pm1;
+        if (integral_moment_pm1 > 1e-15) {
+            result.g_eq = -integral_moment_p / integral_moment_pm1;
 
-            // Contact center
-            result.p_c = integral_position / integral_weight;
+            result.p_c = integral_position / integral_moment_pm1;
 
-            // Equivalent contact normal
-            result.n_c = integral_normal.normalized();
-            if (result.n_c.norm() < 1e-10) {
+            if (integral_orientation.norm() > 1e-10) {
+                result.n_c = integral_orientation.normalized();
+            } else if (integral_normal.norm() < 1e-10) {
                 result.n_c = Eigen::Vector3d(0, 1, 0);
+            } else {
+                result.n_c = (-integral_normal).normalized();
             }
 
-            // Compute torsion inertia radius
             result.r_tau = computeTorsionRadius(
-                position_samples, normal_samples, weight_samples, result.p_c, result.n_c);
+                position_samples, weight_samples, result.p_c, result.n_c);
 
-            result.volume = integral_weight;
             result.weighted_centroid = result.p_c;
         }
 
@@ -284,11 +302,10 @@ private:
     /**
      * @brief Compute torsion inertia radius
      *
-     * r_tau = sqrt(integral ||(x - p_c) x n_c||^2 w(x) dV / integral w(x) dV)
+     * r_tau = sqrt(sum ||(x - p_c) x n_c||^2 w_p / sum w_p)
      */
     double computeTorsionRadius(
         const std::vector<Eigen::Vector3d>& positions,
-        const std::vector<Eigen::Vector3d>& normals,
         const std::vector<double>& weights,
         const Eigen::Vector3d& p_c,
         const Eigen::Vector3d& n_c) const {

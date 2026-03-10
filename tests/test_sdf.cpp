@@ -17,7 +17,7 @@ using namespace vde;
  *
  * Verify:
  * 1. Gradient vector is normalized (length is 1)
- * 2. Gradient points outward
+ * 2. Gradient points outward everywhere except the sphere center
  * 3. Distance is 0 on surface
  */
 bool testSphereSDF() {
@@ -49,18 +49,16 @@ bool testSphereSDF() {
             max_norm_error = norm_error;
         }
 
-        // Verify gradient points outward: for outside points, phi > 0, gradient should point away from center
-        // For inside points, phi < 0, gradient should point toward center
+        // SphereSDF::gradient always returns the outward normal, regardless of
+        // whether the point is inside or outside the sphere.
         if (phi > 1e-6) {
-            // Outside point: gradient should be in same direction as (x - center)
             Eigen::Vector3d expected_dir = (x - center).normalized();
             double dir_error = (grad - expected_dir).norm();
             if (dir_error < 1e-6) {
                 passed++;
             }
         } else if (phi < -1e-6) {
-            // Inside point: gradient should be in opposite direction to (x - center) (pointing to nearest outside)
-            Eigen::Vector3d expected_dir = (center - x).normalized();
+            Eigen::Vector3d expected_dir = (x - center).normalized();
             double dir_error = (grad - expected_dir).norm();
             if (dir_error < 1e-6) {
                 passed++;
@@ -107,10 +105,26 @@ bool testBoxSDF() {
         }
     }
 
+    Eigen::Vector3d inside_point(0, 0, 0);
+    Eigen::Vector3d surface_point(1, 0, 0);
+    Eigen::Vector3d outside_point(2, 0, 0);
+    double inside_phi = box.phi(inside_point);
+    double surface_phi = box.phi(surface_point);
+    double outside_phi = box.phi(outside_point);
+
+    std::cout << "  phi(center): " << inside_phi << std::endl;
+    std::cout << "  phi(surface): " << surface_phi << std::endl;
+    std::cout << "  phi(outside): " << outside_phi << std::endl;
+
+    bool signed_distance_ok =
+        (inside_phi < 0.0) &&
+        (std::abs(surface_phi) < 1e-10) &&
+        (outside_phi > 0.0);
+
     std::cout << "  Samples: " << num_samples << std::endl;
     std::cout << "  Max norm error: " << max_norm_error << std::endl;
 
-    return max_norm_error < 1e-6;
+    return max_norm_error < 1e-6 && signed_distance_ok;
 }
 
 /**

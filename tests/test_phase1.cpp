@@ -10,6 +10,7 @@
 
 #include <iostream>
 #include <cmath>
+#include <vector>
 #include "geometry/AnalyticalSDF.h"
 #include "geometry/VolumetricIntegrator.h"
 
@@ -130,30 +131,42 @@ bool testCriterion3_TorsionRadiusValidity() {
 
     VolumetricIntegrator integrator(64, 2.0);
 
+    // Use the same penetration depth for both boxes so that the difference in
+    // r_tau comes from the contact patch geometry instead of different overlap.
+    double penetration_depth = 0.25;
+
     // Test 1: Flat box (large contact area)
-    // Size: 4 x 4 x 1, bottom at y = 0
-    Eigen::Vector3d flat_min(-2, 0, -2);
-    Eigen::Vector3d flat_max(2, 1, 2);
+    // Size: 4 x 4 x 1, bottom penetrates the plane by 0.25
+    Eigen::Vector3d flat_min(-2, -penetration_depth, -2);
+    Eigen::Vector3d flat_max(2, 1.0 - penetration_depth, 2);
     BoxSDF box_flat(flat_min, flat_max);
     AABB flat_aabb = VolumetricIntegrator::boxAABB(box_flat, 0.5);
     ContactGeometry contact_flat = integrator.computeContactGeometry(box_flat, plane, flat_aabb, plane_aabb);
 
     // Test 2: Tall box (small contact area)
-    // Size: 1 x 4 x 1, bottom at y = 0
-    Eigen::Vector3d tall_min(-0.5, 0, -0.5);
-    Eigen::Vector3d tall_max(0.5, 4, 0.5);
+    // Size: 1 x 4 x 1, bottom penetrates the plane by the same amount
+    Eigen::Vector3d tall_min(-0.5, -penetration_depth, -0.5);
+    Eigen::Vector3d tall_max(0.5, 4.0 - penetration_depth, 0.5);
     BoxSDF box_tall(tall_min, tall_max);
     AABB tall_aabb = VolumetricIntegrator::boxAABB(box_tall, 0.5);
     ContactGeometry contact_tall = integrator.computeContactGeometry(box_tall, plane, tall_aabb, plane_aabb);
 
+    bool valid_contacts = (contact_flat.r_tau > 1e-12) && (contact_tall.r_tau > 1e-12);
+    double ratio = valid_contacts ? (contact_flat.r_tau / contact_tall.r_tau) : 0.0;
+
+    std::cout << "  Penetration depth: " << penetration_depth << std::endl;
+    std::cout << "  Flat box: g_eq = " << contact_flat.g_eq
+              << ", volume = " << contact_flat.volume << std::endl;
     std::cout << "  Flat box (4x4 base): r_tau = " << contact_flat.r_tau << std::endl;
+    std::cout << "  Tall box: g_eq = " << contact_tall.g_eq
+              << ", volume = " << contact_tall.volume << std::endl;
     std::cout << "  Tall box (1x1 base): r_tau = " << contact_tall.r_tau << std::endl;
 
     // Acceptance criterion: flat box torsion radius should be significantly larger than tall box
-    bool passed = contact_flat.r_tau > contact_tall.r_tau * 2.0;  // At least 2x larger
+    bool passed = valid_contacts && ratio > 2.0;  // At least 2x larger
 
     std::cout << "  Expected: r_tau(flat) >> r_tau(tall)" << std::endl;
-    std::cout << "  Ratio: " << (contact_flat.r_tau / contact_tall.r_tau) << std::endl;
+    std::cout << "  Ratio: " << ratio << std::endl;
     std::cout << "  Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
 
     return passed;

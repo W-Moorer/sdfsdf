@@ -143,6 +143,9 @@ public:
      * @brief Get mass matrix (6x6)
      */
     Eigen::Matrix<double, 6, 6> massMatrix() const {
+        if (is_static_) {
+            return Eigen::Matrix<double, 6, 6>::Zero();
+        }
         Eigen::Matrix<double, 6, 6> M = Eigen::Matrix<double, 6, 6>::Zero();
         M.block<3, 3>(0, 0) = properties_.mass * Eigen::Matrix3d::Identity();
         M.block<3, 3>(3, 3) = inertiaTensorWorld();
@@ -153,6 +156,9 @@ public:
      * @brief Get inverse mass matrix (6x6)
      */
     Eigen::Matrix<double, 6, 6> inverseMassMatrix() const {
+        if (is_static_) {
+            return Eigen::Matrix<double, 6, 6>::Zero();
+        }
         Eigen::Matrix<double, 6, 6> Minv = Eigen::Matrix<double, 6, 6>::Zero();
         Minv.block<3, 3>(0, 0) = (1.0 / properties_.mass) * Eigen::Matrix3d::Identity();
         Minv.block<3, 3>(3, 3) = inertiaTensorWorld().inverse();
@@ -230,12 +236,43 @@ public:
     }
 
     /**
+     * @brief Get accumulated external force
+     */
+    const Eigen::Vector3d& externalForce() const {
+        return external_force_;
+    }
+
+    /**
+     * @brief Get accumulated external torque
+     */
+    const Eigen::Vector3d& externalTorque() const {
+        return external_torque_;
+    }
+
+    /**
+     * @brief Get accumulated external wrench [f; tau]
+     */
+    SpatialVector externalWrench() const {
+        SpatialVector wrench;
+        wrench.head<3>() = external_force_;
+        wrench.tail<3>() = external_torque_;
+        return wrench;
+    }
+
+    /**
      * @brief Semi-implicit Euler integration step
      *
      * @param dt Time step
      * @param gravity Gravity vector
      */
     void integrate(double dt, const Eigen::Vector3d& gravity = Eigen::Vector3d::Zero()) {
+        if (is_static_) {
+            clearForces();
+            state_.linear_velocity.setZero();
+            state_.angular_velocity.setZero();
+            return;
+        }
+
         // Add gravity
         external_force_ += properties_.mass * gravity;
 
@@ -321,6 +358,38 @@ public:
     }
 
     /**
+     * @brief Get angular velocity
+     */
+    Eigen::Vector3d angularVelocity() const {
+        return state_.angular_velocity;
+    }
+
+    /**
+     * @brief Set angular velocity
+     */
+    void setAngularVelocity(const Eigen::Vector3d& vel) {
+        state_.angular_velocity = vel;
+    }
+
+    /**
+     * @brief Get full spatial velocity [v; omega]
+     */
+    SpatialVector spatialVelocity() const {
+        SpatialVector v;
+        v.head<3>() = state_.linear_velocity;
+        v.tail<3>() = state_.angular_velocity;
+        return v;
+    }
+
+    /**
+     * @brief Set full spatial velocity [v; omega]
+     */
+    void setSpatialVelocity(const SpatialVector& vel) {
+        state_.linear_velocity = vel.head<3>();
+        state_.angular_velocity = vel.tail<3>();
+    }
+
+    /**
      * @brief Get linear momentum
      */
     Eigen::Vector3d linearMomentum() const {
@@ -332,6 +401,19 @@ public:
      */
     double mass() const {
         return properties_.mass;
+    }
+
+    bool isStatic() const {
+        return is_static_;
+    }
+
+    void setStatic(bool is_static) {
+        is_static_ = is_static;
+        if (is_static_) {
+            state_.linear_velocity.setZero();
+            state_.angular_velocity.setZero();
+            clearForces();
+        }
     }
 
     /**
@@ -351,6 +433,7 @@ public:
 private:
     RigidBodyState state_;
     RigidBodyProperties properties_;
+    bool is_static_ = false;
 
     Eigen::Vector3d external_force_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d external_torque_ = Eigen::Vector3d::Zero();

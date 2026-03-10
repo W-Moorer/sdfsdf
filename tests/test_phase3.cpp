@@ -12,6 +12,8 @@
 #include <vector>
 #include "dynamics/RigidBody.h"
 #include "dynamics/ContactDynamics.h"
+#include "geometry/AnalyticalSDF.h"
+#include "geometry/VolumetricIntegrator.h"
 
 using namespace vde;
 
@@ -199,6 +201,74 @@ bool testMassMatrix() {
     return passed;
 }
 
+/**
+ * @brief Test the integrated normal Jacobian against finite differences
+ *
+ * Validates the paper's J_n = D g_eq / D q formula on a sphere-plane contact.
+ */
+bool testIntegratedNormalJacobian() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Integrated Normal Jacobian Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    const double radius = 1.0;
+    const double center_y = 0.8;  // 0.2 penetration into y=0 plane
+    const double epsilon = 1e-4;
+
+    const auto local_sphere = std::make_shared<SphereSDF>(Eigen::Vector3d::Zero(), radius);
+    const auto local_plane = std::make_shared<HalfSpaceSDF>(
+        Eigen::Vector3d(0, 1, 0), Eigen::Vector3d::Zero());
+    TransformedSDF sphere(local_sphere, Eigen::Vector3d(0, center_y, 0), Eigen::Quaterniond::Identity());
+    TransformedSDF plane(local_plane, Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity());
+    AABB sphere_aabb(
+        Eigen::Vector3d(-radius - 0.5, center_y - radius - 0.5, -radius - 0.5),
+        Eigen::Vector3d(radius + 0.5, center_y + radius + 0.5, radius + 0.5));
+    AABB plane_aabb = VolumetricIntegrator::halfSpaceAABB(
+        *local_plane, Eigen::Vector3d::Zero(), 3.0);
+    VolumetricIntegrator integrator(64, 2.0);
+    ContactGeometry geometry = integrator.computeContactGeometry(sphere, plane, sphere_aabb, plane_aabb);
+
+    ContactConstraint constraint;
+    constraint.computeJacobiansFromGeometry(
+        geometry,
+        Eigen::Vector3d(0, center_y, 0),
+        Eigen::Vector3d::Zero(),
+        1e-6);
+    constraint.J_n = computeIntegratedNormalJacobianFiniteDifference(
+        integrator,
+        local_sphere,
+        sphere_aabb,
+        Eigen::Vector3d(0, center_y, 0),
+        Eigen::Quaterniond::Identity(),
+        local_plane,
+        plane_aabb,
+        Eigen::Vector3d::Zero(),
+        Eigen::Quaterniond::Identity(),
+        1e-5);
+
+    TransformedSDF sphere_plus(
+        local_sphere, Eigen::Vector3d(0, center_y + epsilon, 0), Eigen::Quaterniond::Identity());
+    TransformedSDF sphere_minus(
+        local_sphere, Eigen::Vector3d(0, center_y - epsilon, 0), Eigen::Quaterniond::Identity());
+
+    const double g_plus =
+        integrator.computeContactGeometry(sphere_plus, plane, sphere_aabb, plane_aabb).g_eq;
+    const double g_minus =
+        integrator.computeContactGeometry(sphere_minus, plane, sphere_aabb, plane_aabb).g_eq;
+
+    const double fd = (g_plus - g_minus) / (2.0 * epsilon);
+    const double analytic = constraint.J_n(0, 1);
+    const double rel_error = std::abs(fd - analytic) / std::max(1.0, std::abs(fd));
+
+    std::cout << "Finite-difference dg_eq/dy: " << fd << std::endl;
+    std::cout << "Analytical J_n * e_y: " << analytic << std::endl;
+    std::cout << "Relative error: " << rel_error << std::endl;
+
+    const bool passed = rel_error < 5e-2;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 3 Acceptance Tests" << std::endl;
@@ -208,6 +278,7 @@ int main() {
     bool test2 = testCriterion2_VirtualWorkConsistency();
     bool test3 = testRigidBodyIntegration();
     bool test4 = testMassMatrix();
+    bool test5 = testIntegratedNormalJacobian();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 3 Acceptance Summary" << std::endl;
@@ -216,8 +287,9 @@ int main() {
     std::cout << "Criterion 2 (Virtual Work): " << (test2 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Rigid Body Integration: " << (test3 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Mass Matrix: " << (test4 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Integrated Normal Jacobian: " << (test5 ? "PASSED" : "FAILED") << std::endl;
 
-    bool all_passed = test1 && test2 && test3 && test4;
+    bool all_passed = test1 && test2 && test3 && test4 && test5;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;
