@@ -172,6 +172,32 @@ public:
         return nullptr;
     }
 
+    std::shared_ptr<const RigidBody> getBody(int id) const {
+        if (id >= 0 && id < static_cast<int>(bodies_.size())) {
+            return bodies_[id];
+        }
+        return nullptr;
+    }
+
+    const RegisteredShape* getBodyShape(int id) const {
+        if (id >= 0 && id < static_cast<int>(shapes_.size())) {
+            return &shapes_[id];
+        }
+        return nullptr;
+    }
+
+    const std::vector<std::shared_ptr<RigidBody>>& bodies() const {
+        return bodies_;
+    }
+
+    const std::vector<RegisteredShape>& shapes() const {
+        return shapes_;
+    }
+
+    const SimulationConfig& config() const {
+        return config_;
+    }
+
     void clear() {
         bodies_.clear();
         shapes_.clear();
@@ -270,8 +296,6 @@ public:
         }
         return count;
     }
-
-    const SimulationConfig& config() const { return config_; }
 
     void setConfig(const SimulationConfig& config) {
         config_ = config;
