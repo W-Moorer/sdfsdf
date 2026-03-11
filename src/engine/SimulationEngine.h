@@ -10,7 +10,10 @@
 #include "dynamics/ContactDynamics.h"
 #include "geometry/AnalyticalSDF.h"
 #include "geometry/VolumetricIntegrator.h"
+#include "solver/FourDPGSSolver.h"
+#include "solver/FrictionPGSSolver.h"
 #include "solver/NormalLCPSolver.h"
+#include "solver/PolyhedralFrictionSolver.h"
 #include "solver/SOCCPSolver.h"
 #include <array>
 #include <chrono>
@@ -67,6 +70,8 @@ struct SimulationStats {
     int num_contacts = 0;
     int solver_iterations = 0;
     double solver_residual = 0.0;
+    double solver_scaled_residual = 0.0;
+    double solver_complementarity_violation = 0.0;
     double step_time_ms = 0.0;
     double broad_phase_time_ms = 0.0;
     double narrow_phase_time_ms = 0.0;
@@ -80,7 +85,10 @@ struct SimulationStats {
  */
 enum class ContactSolverMode {
     SOCCP,
-    NormalLCP
+    NormalLCP,
+    FrictionPGS,
+    FourDPGS,
+    PolyhedralFriction
 };
 
 struct SimulationConfig {
@@ -96,6 +104,7 @@ struct SimulationConfig {
     int contact_grid_resolution = 24;
     double contact_p_norm = 2.0;
     double torsion_regularization = 1e-4;
+    int polyhedral_friction_directions = 8;
     ContactSolverMode solver_mode = ContactSolverMode::SOCCP;
     Eigen::Vector3d gravity = Eigen::Vector3d(0, -9.81, 0);
 
@@ -169,6 +178,9 @@ public:
         contacts_.clear();
         last_soccp_state_.resize(0);
         last_normal_lcp_lambda_.resize(0);
+        last_friction_pgs_impulses_.resize(0);
+        last_four_d_pgs_impulses_.resize(0);
+        last_polyhedral_impulses_.resize(0);
         current_time_ = 0.0;
         step_count_ = 0;
     }
@@ -268,6 +280,9 @@ public:
         integrator_.setPNorm(config.contact_p_norm);
         last_soccp_state_.resize(0);
         last_normal_lcp_lambda_.resize(0);
+        last_friction_pgs_impulses_.resize(0);
+        last_four_d_pgs_impulses_.resize(0);
+        last_polyhedral_impulses_.resize(0);
     }
 
 private:
@@ -279,6 +294,9 @@ private:
     VolumetricIntegrator integrator_;
     Eigen::VectorXd last_soccp_state_;
     Eigen::VectorXd last_normal_lcp_lambda_;
+    Eigen::VectorXd last_friction_pgs_impulses_;
+    Eigen::VectorXd last_four_d_pgs_impulses_;
+    Eigen::VectorXd last_polyhedral_impulses_;
     double current_time_;
     int step_count_;
 
@@ -410,8 +428,13 @@ private:
         if (active_body_ids.empty()) {
             last_soccp_state_.resize(0);
             last_normal_lcp_lambda_.resize(0);
+            last_friction_pgs_impulses_.resize(0);
+            last_four_d_pgs_impulses_.resize(0);
+            last_polyhedral_impulses_.resize(0);
             stats.solver_iterations = 0;
             stats.solver_residual = 0.0;
+            stats.solver_scaled_residual = 0.0;
+            stats.solver_complementarity_violation = 0.0;
             return;
         }
 
@@ -429,6 +452,9 @@ private:
         Eigen::VectorXd solved_velocity = global_free_velocity;
         SOCCPSolution solution;
         NormalLCPSolution normal_lcp_solution;
+        FrictionPGSSolution friction_pgs_solution;
+        FourDPGSSolution four_d_pgs_solution;
+        PolyhedralFrictionSolution polyhedral_solution;
 
         if (!contacts_.empty()) {
             const int nc = static_cast<int>(contacts_.size());
@@ -502,6 +528,9 @@ private:
 
             if (config_.solver_mode == ContactSolverMode::NormalLCP) {
                 last_soccp_state_.resize(0);
+                last_friction_pgs_impulses_.resize(0);
+                last_four_d_pgs_impulses_.resize(0);
+                last_polyhedral_impulses_.resize(0);
                 NormalLCPProblem problem;
                 problem.mass_matrix = mass_matrix;
                 problem.free_velocity = global_free_velocity;
@@ -535,8 +564,174 @@ private:
                     normal_lcp_solution.residual.size() > 0
                         ? normal_lcp_solution.residual.lpNorm<Eigen::Infinity>()
                         : (converged ? 0.0 : std::numeric_limits<double>::infinity());
+                stats.solver_scaled_residual = normal_lcp_solution.scaled_residual;
+                stats.solver_complementarity_violation =
+                    normal_lcp_solution.complementarity_violation;
+            } else if (config_.solver_mode == ContactSolverMode::FrictionPGS) {
+                last_soccp_state_.resize(0);
+                last_normal_lcp_lambda_.resize(0);
+                last_four_d_pgs_impulses_.resize(0);
+                last_polyhedral_impulses_.resize(0);
+
+                FrictionPGSProblem problem;
+                problem.mass_matrix = mass_matrix;
+                problem.free_velocity = global_free_velocity;
+                problem.normal_jacobian = normal_jacobian;
+                problem.tangential_jacobian = Eigen::MatrixXd::Zero(2 * nc, nv);
+                for (int contact_id = 0; contact_id < nc; ++contact_id) {
+                    problem.tangential_jacobian.block(2 * contact_id, 0, 2, nv) =
+                        tangential_jacobian.block(3 * contact_id, 0, 2, nv);
+                }
+                problem.g_eq = g_eq;
+                problem.friction_coefficients = friction_coefficients;
+                problem.baumgarte_gamma = baumgarte_gamma;
+                problem.time_step = config_.time_step;
+
+                FrictionPGSSolver solver(
+                    config_.max_solver_iterations,
+                    config_.solver_tolerance);
+                const Eigen::VectorXd* initial_impulses =
+                    (last_friction_pgs_impulses_.size() == 3 * nc)
+                        ? &last_friction_pgs_impulses_
+                        : nullptr;
+                const bool converged =
+                    solver.solve(problem, initial_impulses, friction_pgs_solution);
+
+                if (friction_pgs_solution.lambda_n.size() == nc &&
+                    friction_pgs_solution.lambda_t.size() == 2 * nc &&
+                    friction_pgs_solution.lambda_n.allFinite() &&
+                    friction_pgs_solution.lambda_t.allFinite()) {
+                    last_friction_pgs_impulses_ = FrictionPGSSolver::packWarmStart(
+                        friction_pgs_solution.lambda_n,
+                        friction_pgs_solution.lambda_t);
+                } else {
+                    last_friction_pgs_impulses_.resize(0);
+                }
+
+                if (friction_pgs_solution.velocity.size() == nv &&
+                    friction_pgs_solution.velocity.allFinite()) {
+                    solved_velocity = friction_pgs_solution.velocity;
+                }
+
+                stats.solver_iterations = friction_pgs_solution.stats.iterations;
+                stats.solver_residual =
+                    friction_pgs_solution.residual.size() > 0
+                        ? friction_pgs_solution.residual.lpNorm<Eigen::Infinity>()
+                        : (converged ? 0.0 : std::numeric_limits<double>::infinity());
+                stats.solver_scaled_residual = friction_pgs_solution.scaled_residual;
+                stats.solver_complementarity_violation =
+                    friction_pgs_solution.complementarity_violation;
+            } else if (config_.solver_mode == ContactSolverMode::FourDPGS) {
+                last_soccp_state_.resize(0);
+                last_normal_lcp_lambda_.resize(0);
+                last_friction_pgs_impulses_.resize(0);
+                last_polyhedral_impulses_.resize(0);
+
+                FourDPGSProblem problem;
+                problem.mass_matrix = mass_matrix;
+                problem.free_velocity = global_free_velocity;
+                problem.normal_jacobian = normal_jacobian;
+                problem.tangential_jacobian = tangential_jacobian;
+                problem.g_eq = g_eq;
+                problem.friction_coefficients = friction_coefficients;
+                problem.baumgarte_gamma = baumgarte_gamma;
+                problem.time_step = config_.time_step;
+
+                FourDPGSSolver solver(
+                    config_.max_solver_iterations,
+                    config_.solver_tolerance);
+                const Eigen::VectorXd* initial_impulses =
+                    (last_four_d_pgs_impulses_.size() == 4 * nc)
+                        ? &last_four_d_pgs_impulses_
+                        : nullptr;
+                const bool converged =
+                    solver.solve(problem, initial_impulses, four_d_pgs_solution);
+
+                if (four_d_pgs_solution.lambda_n.size() == nc &&
+                    four_d_pgs_solution.lambda_t.size() == 3 * nc &&
+                    four_d_pgs_solution.lambda_n.allFinite() &&
+                    four_d_pgs_solution.lambda_t.allFinite()) {
+                    last_four_d_pgs_impulses_ = FourDPGSSolver::packWarmStart(
+                        four_d_pgs_solution.lambda_n,
+                        four_d_pgs_solution.lambda_t);
+                } else {
+                    last_four_d_pgs_impulses_.resize(0);
+                }
+
+                if (four_d_pgs_solution.velocity.size() == nv &&
+                    four_d_pgs_solution.velocity.allFinite()) {
+                    solved_velocity = four_d_pgs_solution.velocity;
+                }
+
+                stats.solver_iterations = four_d_pgs_solution.stats.iterations;
+                stats.solver_residual =
+                    four_d_pgs_solution.residual.size() > 0
+                        ? four_d_pgs_solution.residual.lpNorm<Eigen::Infinity>()
+                        : (converged ? 0.0 : std::numeric_limits<double>::infinity());
+                stats.solver_scaled_residual = four_d_pgs_solution.scaled_residual;
+                stats.solver_complementarity_violation =
+                    four_d_pgs_solution.complementarity_violation;
+            } else if (config_.solver_mode == ContactSolverMode::PolyhedralFriction) {
+                last_soccp_state_.resize(0);
+                last_normal_lcp_lambda_.resize(0);
+                last_friction_pgs_impulses_.resize(0);
+                last_four_d_pgs_impulses_.resize(0);
+
+                PolyhedralFrictionProblem problem;
+                problem.mass_matrix = mass_matrix;
+                problem.free_velocity = global_free_velocity;
+                problem.normal_jacobian = normal_jacobian;
+                problem.tangential_jacobian = Eigen::MatrixXd::Zero(2 * nc, nv);
+                for (int contact_id = 0; contact_id < nc; ++contact_id) {
+                    problem.tangential_jacobian.block(2 * contact_id, 0, 2, nv) =
+                        tangential_jacobian.block(3 * contact_id, 0, 2, nv);
+                }
+                problem.g_eq = g_eq;
+                problem.friction_coefficients = friction_coefficients;
+                problem.baumgarte_gamma = baumgarte_gamma;
+                problem.time_step = config_.time_step;
+                problem.num_directions = std::max(4, config_.polyhedral_friction_directions);
+
+                PolyhedralFrictionSolver solver(
+                    config_.max_solver_iterations,
+                    config_.solver_tolerance);
+                const Eigen::VectorXd* initial_impulses =
+                    (last_polyhedral_impulses_.size() ==
+                     nc + nc * problem.num_directions)
+                        ? &last_polyhedral_impulses_
+                        : nullptr;
+                const bool converged =
+                    solver.solve(problem, initial_impulses, polyhedral_solution);
+
+                if (polyhedral_solution.lambda_n.size() == nc &&
+                    polyhedral_solution.beta.size() == nc * problem.num_directions &&
+                    polyhedral_solution.lambda_n.allFinite() &&
+                    polyhedral_solution.beta.allFinite()) {
+                    last_polyhedral_impulses_ = PolyhedralFrictionSolver::packWarmStart(
+                        polyhedral_solution.lambda_n,
+                        polyhedral_solution.beta);
+                } else {
+                    last_polyhedral_impulses_.resize(0);
+                }
+
+                if (polyhedral_solution.velocity.size() == nv &&
+                    polyhedral_solution.velocity.allFinite()) {
+                    solved_velocity = polyhedral_solution.velocity;
+                }
+
+                stats.solver_iterations = polyhedral_solution.stats.iterations;
+                stats.solver_residual =
+                    polyhedral_solution.residual.size() > 0
+                        ? polyhedral_solution.residual.lpNorm<Eigen::Infinity>()
+                        : (converged ? 0.0 : std::numeric_limits<double>::infinity());
+                stats.solver_scaled_residual = polyhedral_solution.scaled_residual;
+                stats.solver_complementarity_violation =
+                    polyhedral_solution.complementarity_violation;
             } else {
                 last_normal_lcp_lambda_.resize(0);
+                last_friction_pgs_impulses_.resize(0);
+                last_four_d_pgs_impulses_.resize(0);
+                last_polyhedral_impulses_.resize(0);
                 SOCCPProblem problem;
                 problem.mass_matrix = mass_matrix;
                 problem.free_velocity = global_free_velocity;
@@ -572,12 +767,19 @@ private:
                     solution.residual.size() > 0
                         ? solution.residual.lpNorm<Eigen::Infinity>()
                         : (converged ? 0.0 : std::numeric_limits<double>::infinity());
+                stats.solver_scaled_residual = solution.scaled_residual;
+                stats.solver_complementarity_violation =
+                    solution.complementarity_violation;
             }
         } else {
             last_soccp_state_.resize(0);
             last_normal_lcp_lambda_.resize(0);
+            last_friction_pgs_impulses_.resize(0);
+            last_four_d_pgs_impulses_.resize(0);
             stats.solver_iterations = 0;
             stats.solver_residual = 0.0;
+            stats.solver_scaled_residual = 0.0;
+            stats.solver_complementarity_violation = 0.0;
         }
 
         for (size_t i = 0; i < active_body_ids.size(); ++i) {

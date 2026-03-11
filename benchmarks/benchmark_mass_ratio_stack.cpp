@@ -108,6 +108,8 @@ int main() {
             converged ? 1.0 : 0.0,
             static_cast<double>(solution.stats.iterations),
             residual,
+            solution.scaled_residual,
+            solution.complementarity_violation,
             heavy_speed,
             light_speed
         }));
@@ -115,26 +117,49 @@ int main() {
 
     double max_iterations = 0.0;
     double max_residual = 0.0;
+    double max_scaled_residual = 0.0;
+    double max_complementarity = 0.0;
     double min_converged = 1.0;
     for (const auto& row : rows) {
         max_iterations = std::max(max_iterations, std::stod(row[3]));
         max_residual = std::max(max_residual, std::stod(row[4]));
+        max_scaled_residual = std::max(max_scaled_residual, std::stod(row[5]));
+        max_complementarity = std::max(max_complementarity, std::stod(row[6]));
         min_converged = std::min(min_converged, std::stod(row[2]));
     }
 
     const auto dir = resultsDirectory();
     writeCsv(
         dir / "benchmark_mass_ratio_stack.csv",
-        {"heavy_mass", "mass_ratio", "converged", "iterations", "residual_inf", "heavy_speed", "light_speed"},
+        {
+            "heavy_mass",
+            "mass_ratio",
+            "converged",
+            "iterations",
+            "residual_inf",
+            "scaled_residual",
+            "complementarity_violation",
+            "heavy_speed",
+            "light_speed"
+        },
         rows);
     writeCsv(
         dir / "benchmark_mass_ratio_stack_summary.csv",
-        {"max_mass_ratio", "min_converged", "max_iterations", "max_residual_inf"},
+        {
+            "max_mass_ratio",
+            "min_converged",
+            "max_iterations",
+            "max_residual_inf",
+            "max_scaled_residual",
+            "max_complementarity_violation"
+        },
         {vectorToRow({
             1000.0,
             min_converged,
             max_iterations,
-            max_residual
+            max_residual,
+            max_scaled_residual,
+            max_complementarity
         })});
 
     std::cout << "benchmark_mass_ratio_stack.csv written to "

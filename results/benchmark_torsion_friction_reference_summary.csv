@@ -1,0 +1,2 @@
+torsion_radius,alpha_ref,stop_time_ref,stop_time_4d,stop_time_3d,relative_stop_error_4d,max_omega_error_4d,max_theta_error_4d,max_lambda_n_error,max_lambda_tau_error_active,final_omega_4d,final_omega_3d
+0.3000000000,10.1733333333,0.9829619921,0.9400000000,1.2000000000,0.0437066667,0.0000000000,0.0498939607,0.0000000000,0.0000000000,0.0000000000,10.0000000000

@@ -70,6 +70,8 @@ struct NormalLCPSolution {
     Eigen::VectorXd residual;
     Eigen::MatrixXd delassus;
     Eigen::VectorXd bias;
+    double scaled_residual = 0.0;
+    double complementarity_violation = 0.0;
     NormalLCPStats stats;
 };
 
@@ -162,6 +164,8 @@ public:
         solution.residual = residualVector(solution.lambda_n, solution.complementarity);
         solution.velocity = problem.free_velocity + problem.time_step * Minv_Jt * solution.lambda_n;
         solution.stats.final_residual = solution.residual.lpNorm<Eigen::Infinity>();
+        solution.scaled_residual = computeScaledResidual(solution);
+        solution.complementarity_violation = solution.scaled_residual;
         solution.stats.converged = solution.stats.final_residual < tolerance_;
         return solution.stats.converged;
     }
@@ -220,6 +224,24 @@ private:
             });
         }
         return residual;
+    }
+
+    static double computeScaledResidual(const NormalLCPSolution& solution) {
+        const double raw = solution.residual.lpNorm<Eigen::Infinity>();
+        const double scale = std::max(
+            {
+                1.0,
+                solution.lambda_n.size() > 0
+                    ? solution.lambda_n.lpNorm<Eigen::Infinity>()
+                    : 0.0,
+                solution.complementarity.size() > 0
+                    ? solution.complementarity.lpNorm<Eigen::Infinity>()
+                    : 0.0,
+                solution.velocity.size() > 0
+                    ? solution.velocity.lpNorm<Eigen::Infinity>()
+                    : 0.0
+            });
+        return raw / scale;
     }
 };
 

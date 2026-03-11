@@ -1,0 +1,2 @@
+max_upper_y_diff,max_upper_vy_diff,max_penetration_diff,max_contact_diff,peak_penetration_analytic,peak_penetration_mesh,peak_scaled_residual_analytic,peak_scaled_residual_mesh,peak_complementarity_analytic,peak_complementarity_mesh
+0.0000000013,0.0000000229,0.0000000001,0.0000000000,0.0296296296,0.0296296296,0.0000000714,0.0000000714,0.0000000052,0.0000000052

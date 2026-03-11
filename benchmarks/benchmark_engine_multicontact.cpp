@@ -95,6 +95,24 @@ double kineticEnergy(const std::vector<BodyShape>& bodies) {
     return total;
 }
 
+void populateEngineScene(SimulationEngine& engine,
+                         const std::shared_ptr<SDF>& box_sdf,
+                         const AABB& box_aabb,
+                         const std::shared_ptr<SDF>& ground_sdf,
+                         const AABB& ground_aabb,
+                         double box_size) {
+    auto lower_box = std::make_shared<RigidBody>(makeBoxProps(10.0, box_size));
+    lower_box->setPosition(Eigen::Vector3d(0.0, 0.23, 0.0));
+    auto upper_box = std::make_shared<RigidBody>(makeBoxProps(1.0, box_size));
+    upper_box->setPosition(Eigen::Vector3d(0.0, 0.71, 0.0));
+    auto ground = std::make_shared<RigidBody>();
+    ground->setStatic(true);
+
+    engine.addBody(lower_box, box_sdf, box_aabb);
+    engine.addBody(upper_box, box_sdf, box_aabb);
+    engine.addBody(ground, ground_sdf, ground_aabb);
+}
+
 }  // namespace
 
 int main() {
@@ -106,6 +124,7 @@ int main() {
     SimulationConfig config;
     config.time_step = dt;
     config.enable_friction = false;
+    config.enable_torsional_friction = false;
     config.contact_grid_resolution = 28;
     config.contact_p_norm = 2.0;
     config.baumgarte_gamma = 0.10;
@@ -113,13 +132,9 @@ int main() {
     config.solver_tolerance = 1e-8;
 
     SimulationEngine soccp_engine(config);
-
-    auto lower_box = std::make_shared<RigidBody>(makeBoxProps(10.0, box_size));
-    lower_box->setPosition(Eigen::Vector3d(0.0, 0.23, 0.0));
-    auto upper_box = std::make_shared<RigidBody>(makeBoxProps(1.0, box_size));
-    upper_box->setPosition(Eigen::Vector3d(0.0, 0.71, 0.0));
-    auto ground = std::make_shared<RigidBody>();
-    ground->setStatic(true);
+    SimulationConfig normal_lcp_config = config;
+    normal_lcp_config.solver_mode = ContactSolverMode::NormalLCP;
+    SimulationEngine normal_lcp_engine(normal_lcp_config);
 
     auto box_sdf = std::make_shared<BoxSDF>(
         Eigen::Vector3d::Constant(-half),
@@ -133,9 +148,8 @@ int main() {
     const AABB ground_aabb =
         VolumetricIntegrator::halfSpaceAABB(*ground_sdf, Eigen::Vector3d::Zero(), 3.0);
 
-    soccp_engine.addBody(lower_box, box_sdf, box_aabb);
-    soccp_engine.addBody(upper_box, box_sdf, box_aabb);
-    soccp_engine.addBody(ground, ground_sdf, ground_aabb);
+    populateEngineScene(soccp_engine, box_sdf, box_aabb, ground_sdf, ground_aabb, box_size);
+    populateEngineScene(normal_lcp_engine, box_sdf, box_aabb, ground_sdf, ground_aabb, box_size);
 
     std::vector<BodyShape> penalty_bodies;
     penalty_bodies.push_back({std::make_shared<RigidBody>(makeBoxProps(10.0, box_size)), box_sdf, box_aabb});
@@ -156,15 +170,25 @@ int main() {
     rows.reserve(static_cast<size_t>(duration / dt) + 1);
 
     double peak_soccp_penetration = 0.0;
+    double peak_normal_lcp_penetration = 0.0;
     double peak_penalty_penetration = 0.0;
     double peak_soccp_residual = 0.0;
+    double peak_normal_lcp_residual = 0.0;
+    double peak_soccp_scaled_residual = 0.0;
+    double peak_normal_lcp_scaled_residual = 0.0;
+    double peak_soccp_complementarity = 0.0;
+    double peak_normal_lcp_complementarity = 0.0;
     double max_soccp_iterations = 0.0;
-    double residual_exceed_steps = 0.0;
+    double max_normal_lcp_iterations = 0.0;
+    double soccp_residual_exceed_steps = 0.0;
+    double normal_lcp_residual_exceed_steps = 0.0;
 
     const int num_steps = static_cast<int>(duration / dt);
     for (int step = 0; step < num_steps; ++step) {
         const SimulationStats soccp_stats = soccp_engine.step();
+        const SimulationStats normal_lcp_stats = normal_lcp_engine.step();
         const double soccp_penetration = maxPenetrationFromContacts(soccp_engine.getContacts());
+        const double normal_lcp_penetration = maxPenetrationFromContacts(normal_lcp_engine.getContacts());
         const double penalty_penetration = runPenaltyStep(
             penalty_bodies,
             penalty_integrator,
@@ -173,49 +197,124 @@ int main() {
             config.gravity);
 
         peak_soccp_penetration = std::max(peak_soccp_penetration, soccp_penetration);
+        peak_normal_lcp_penetration = std::max(peak_normal_lcp_penetration, normal_lcp_penetration);
         peak_penalty_penetration = std::max(peak_penalty_penetration, penalty_penetration);
         peak_soccp_residual = std::max(peak_soccp_residual, soccp_stats.solver_residual);
+        peak_normal_lcp_residual = std::max(peak_normal_lcp_residual, normal_lcp_stats.solver_residual);
+        peak_soccp_scaled_residual = std::max(
+            peak_soccp_scaled_residual, soccp_stats.solver_scaled_residual);
+        peak_normal_lcp_scaled_residual = std::max(
+            peak_normal_lcp_scaled_residual, normal_lcp_stats.solver_scaled_residual);
+        peak_soccp_complementarity = std::max(
+            peak_soccp_complementarity, soccp_stats.solver_complementarity_violation);
+        peak_normal_lcp_complementarity = std::max(
+            peak_normal_lcp_complementarity,
+            normal_lcp_stats.solver_complementarity_violation);
         max_soccp_iterations = std::max(max_soccp_iterations, static_cast<double>(soccp_stats.solver_iterations));
+        max_normal_lcp_iterations = std::max(
+            max_normal_lcp_iterations, static_cast<double>(normal_lcp_stats.solver_iterations));
         if (soccp_stats.solver_residual > 1e-4) {
-            residual_exceed_steps += 1.0;
+            soccp_residual_exceed_steps += 1.0;
+        }
+        if (normal_lcp_stats.solver_residual > 1e-4) {
+            normal_lcp_residual_exceed_steps += 1.0;
         }
 
         rows.push_back(vectorToRow({
             soccp_engine.currentTime(),
             soccp_penetration,
+            normal_lcp_penetration,
             penalty_penetration,
             soccp_stats.solver_residual,
+            normal_lcp_stats.solver_residual,
+            soccp_stats.solver_scaled_residual,
+            normal_lcp_stats.solver_scaled_residual,
+            soccp_stats.solver_complementarity_violation,
+            normal_lcp_stats.solver_complementarity_violation,
             static_cast<double>(soccp_stats.solver_iterations),
+            static_cast<double>(normal_lcp_stats.solver_iterations),
             soccp_stats.total_energy,
+            normal_lcp_stats.total_energy,
             kineticEnergy(penalty_bodies)
         }));
     }
 
-    const double penetration_reduction =
+    const double soccp_penetration_reduction =
         (peak_penalty_penetration - peak_soccp_penetration) /
         std::max(peak_penalty_penetration, 1e-12);
+    const double normal_lcp_penetration_reduction =
+        (peak_penalty_penetration - peak_normal_lcp_penetration) /
+        std::max(peak_penalty_penetration, 1e-12);
+    const double soccp_vs_normal_lcp_peak_diff =
+        std::abs(peak_soccp_penetration - peak_normal_lcp_penetration);
 
     const auto dir = resultsDirectory();
     writeCsv(
         dir / "benchmark_engine_multicontact.csv",
-        {"time", "soccp_penetration", "penalty_penetration", "soccp_residual", "soccp_iterations", "soccp_energy", "penalty_energy"},
+        {
+            "time",
+            "soccp_penetration",
+            "normal_lcp_penetration",
+            "penalty_penetration",
+            "soccp_residual",
+            "normal_lcp_residual",
+            "soccp_scaled_residual",
+            "normal_lcp_scaled_residual",
+            "soccp_complementarity",
+            "normal_lcp_complementarity",
+            "soccp_iterations",
+            "normal_lcp_iterations",
+            "soccp_energy",
+            "normal_lcp_energy",
+            "penalty_energy"
+        },
         rows);
     writeCsv(
         dir / "benchmark_engine_multicontact_summary.csv",
-        {"peak_soccp_penetration", "peak_penalty_penetration", "penetration_reduction", "peak_soccp_residual", "max_soccp_iterations", "residual_exceed_steps"},
+        {
+            "peak_soccp_penetration",
+            "peak_normal_lcp_penetration",
+            "peak_penalty_penetration",
+            "soccp_penetration_reduction",
+            "normal_lcp_penetration_reduction",
+            "soccp_vs_normal_lcp_peak_diff",
+            "peak_soccp_residual",
+            "peak_normal_lcp_residual",
+            "peak_soccp_scaled_residual",
+            "peak_normal_lcp_scaled_residual",
+            "peak_soccp_complementarity",
+            "peak_normal_lcp_complementarity",
+            "max_soccp_iterations",
+            "max_normal_lcp_iterations",
+            "soccp_residual_exceed_steps",
+            "normal_lcp_residual_exceed_steps"
+        },
         {vectorToRow({
             peak_soccp_penetration,
+            peak_normal_lcp_penetration,
             peak_penalty_penetration,
-            penetration_reduction,
+            soccp_penetration_reduction,
+            normal_lcp_penetration_reduction,
+            soccp_vs_normal_lcp_peak_diff,
             peak_soccp_residual,
+            peak_normal_lcp_residual,
+            peak_soccp_scaled_residual,
+            peak_normal_lcp_scaled_residual,
+            peak_soccp_complementarity,
+            peak_normal_lcp_complementarity,
             max_soccp_iterations,
-            residual_exceed_steps
+            max_normal_lcp_iterations,
+            soccp_residual_exceed_steps,
+            normal_lcp_residual_exceed_steps
         })});
 
     std::cout << "benchmark_engine_multicontact.csv written to "
               << (dir / "benchmark_engine_multicontact.csv") << '\n';
     std::cout << "peak_soccp_penetration=" << peak_soccp_penetration
-              << " peak_penalty_penetration=" << peak_penalty_penetration
-              << " penetration_reduction=" << penetration_reduction << '\n';
+              << " peak_normal_lcp_penetration=" << peak_normal_lcp_penetration
+              << " peak_penalty_penetration=" << peak_penalty_penetration << '\n';
+    std::cout << "soccp_penetration_reduction=" << soccp_penetration_reduction
+              << " normal_lcp_penetration_reduction=" << normal_lcp_penetration_reduction
+              << " soccp_vs_normal_lcp_peak_diff=" << soccp_vs_normal_lcp_peak_diff << '\n';
     return 0;
 }

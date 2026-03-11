@@ -98,8 +98,14 @@ int main() {
 
     double peak_residual_4d = 0.0;
     double peak_residual_3d = 0.0;
+    double peak_scaled_residual_4d = 0.0;
+    double peak_scaled_residual_3d = 0.0;
+    double peak_complementarity_4d = 0.0;
+    double peak_complementarity_3d = 0.0;
     double peak_penetration_4d = 0.0;
     double peak_penetration_3d = 0.0;
+    double max_iterations_4d = 0.0;
+    double max_iterations_3d = 0.0;
 
     for (int step = 0; step < num_steps; ++step) {
         const SimulationStats stats_4d = case_4d.engine.step();
@@ -119,8 +125,18 @@ int main() {
 
         peak_residual_4d = std::max(peak_residual_4d, stats_4d.solver_residual);
         peak_residual_3d = std::max(peak_residual_3d, stats_3d.solver_residual);
+        peak_scaled_residual_4d = std::max(
+            peak_scaled_residual_4d, stats_4d.solver_scaled_residual);
+        peak_scaled_residual_3d = std::max(
+            peak_scaled_residual_3d, stats_3d.solver_scaled_residual);
+        peak_complementarity_4d = std::max(
+            peak_complementarity_4d, stats_4d.solver_complementarity_violation);
+        peak_complementarity_3d = std::max(
+            peak_complementarity_3d, stats_3d.solver_complementarity_violation);
         peak_penetration_4d = std::max(peak_penetration_4d, penetration_4d);
         peak_penetration_3d = std::max(peak_penetration_3d, penetration_3d);
+        max_iterations_4d = std::max(max_iterations_4d, static_cast<double>(stats_4d.solver_iterations));
+        max_iterations_3d = std::max(max_iterations_3d, static_cast<double>(stats_3d.solver_iterations));
 
         rows.push_back(vectorToRow({
             time,
@@ -128,6 +144,12 @@ int main() {
             omega_3d,
             stats_4d.solver_residual,
             stats_3d.solver_residual,
+            stats_4d.solver_scaled_residual,
+            stats_3d.solver_scaled_residual,
+            stats_4d.solver_complementarity_violation,
+            stats_3d.solver_complementarity_violation,
+            static_cast<double>(stats_4d.solver_iterations),
+            static_cast<double>(stats_3d.solver_iterations),
             penetration_4d,
             penetration_3d
         }));
@@ -153,6 +175,12 @@ int main() {
             "omega_3d",
             "residual_4d",
             "residual_3d",
+            "scaled_residual_4d",
+            "scaled_residual_3d",
+            "complementarity_4d",
+            "complementarity_3d",
+            "iterations_4d",
+            "iterations_3d",
             "penetration_4d",
             "penetration_3d"
         },
@@ -167,6 +195,12 @@ int main() {
             "spin_decay_ratio",
             "peak_residual_4d",
             "peak_residual_3d",
+            "peak_scaled_residual_4d",
+            "peak_scaled_residual_3d",
+            "peak_complementarity_4d",
+            "peak_complementarity_3d",
+            "max_iterations_4d",
+            "max_iterations_3d",
             "peak_penetration_4d",
             "peak_penetration_3d"
         },
@@ -178,6 +212,12 @@ int main() {
             spin_decay_ratio,
             peak_residual_4d,
             peak_residual_3d,
+            peak_scaled_residual_4d,
+            peak_scaled_residual_3d,
+            peak_complementarity_4d,
+            peak_complementarity_3d,
+            max_iterations_4d,
+            max_iterations_3d,
             peak_penetration_4d,
             peak_penetration_3d
         })});

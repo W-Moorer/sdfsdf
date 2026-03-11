@@ -1,0 +1,14 @@
+case,branch,peak_residual,median_residual,p95_residual,peak_scaled_residual,peak_complementarity_violation,max_iterations,cap_hit_steps
+cylinder_torsion_compare,4D,3.049259e+00,0.000000e+00,3.027754e+00,1.134327e-04,6.210000e-08,12,0
+cylinder_torsion_compare,3D,8.986561e-01,0.000000e+00,7.630000e-09,1.490203e-03,1.912725e-03,32,0
+coupled_4d_reference,SOCCP,0.000000e+00,0.000000e+00,0.000000e+00,0.000000e+00,0.000000e+00,11,0
+coupled_4d_reference,FourDPGS,0.000000e+00,0.000000e+00,0.000000e+00,0.000000e+00,0.000000e+00,2,0
+two_contact_normal_only,SOCCP,2.893066e-01,2.316478e-01,2.830252e-01,7.140000e-08,5.200000e-09,17,0
+two_contact_normal_only,NormalLCP,2.892009e-01,2.316478e-01,2.830252e-01,2.892009e-01,2.892009e-01,160,40
+tripod_normal_only,SOCCP,1.223361e-02,0.000000e+00,6.320000e-09,1.120000e-08,6.900000e-09,17,0
+tripod_normal_only,NormalLCP,5.777265e-03,0.000000e+00,4.910000e-09,2.625957e-03,2.625957e-03,180,3
+oblique_box_friction,4D,2.775314e-01,0.000000e+00,6.275000e-09,4.119128e-02,8.897428e-04,180,1
+oblique_box_friction,3D,8.200000e-09,0.000000e+00,2.800000e-09,1.100000e-09,6.900000e-09,30,0
+oblique_box_polyhedral,SOCCP-3D,9.400000e-09,0.000000e+00,6.910000e-09,2.000000e-10,2.000000e-10,11,0
+oblique_box_polyhedral,Polyhedral,9.900000e-09,4.800000e-09,9.700000e-09,4.000000e-10,4.000000e-10,75,0
+mass_ratio_sweep,SOCCP,0.000000e+00,0.000000e+00,0.000000e+00,0.000000e+00,0.000000e+00,6,0

@@ -77,6 +77,8 @@ struct SOCCPSolution {
     Eigen::VectorXd lambda_t;
     Eigen::VectorXd slack;
     Eigen::VectorXd residual;
+    double scaled_residual = 0.0;
+    double complementarity_violation = 0.0;
     NewtonStats stats;
 };
 
@@ -115,6 +117,8 @@ public:
         unpackSolution(problem, state, solution);
         solution.residual = computeResidual(problem, state);
         solution.stats.final_residual = solution.residual.norm();
+        solution.scaled_residual = computeScaledResidual(problem, solution);
+        solution.complementarity_violation = computeComplementarityViolation(problem, solution);
         solution.stats.converged = converged && solution.residual.norm() < newton_.tolerance();
         return solution.stats.converged;
     }
@@ -321,6 +325,123 @@ public:
 
     static bool isInsideSOC(const Vector4d& x, double tolerance = 1e-10) {
         return x(0) + tolerance >= x.tail<3>().norm();
+    }
+
+    static double computeScaledResidual(const SOCCPProblem& problem,
+                                        const SOCCPSolution& solution) {
+        if (solution.residual.size() == 0) {
+            return 0.0;
+        }
+
+        const int nv = problem.velocityDofs();
+        const int nc = problem.numContacts();
+        if (solution.velocity.size() != nv ||
+            solution.lambda_n.size() != nc ||
+            solution.lambda_t.size() != 3 * nc ||
+            solution.slack.size() != nc) {
+            return solution.residual.lpNorm<Eigen::Infinity>();
+        }
+
+        const double raw = solution.residual.lpNorm<Eigen::Infinity>();
+        const Eigen::VectorXd momentum_balance =
+            problem.mass_matrix * (solution.velocity - problem.free_velocity)
+            - problem.time_step * problem.normal_jacobian.transpose() * solution.lambda_n
+            - problem.time_step * problem.tangential_jacobian.transpose() * solution.lambda_t;
+
+        double contact_scale = 1.0;
+        for (int i = 0; i < nc; ++i) {
+            const double u_n =
+                (problem.normal_jacobian.row(i) * solution.velocity)(0) + stabilization(problem, i);
+            const Eigen::Vector3d u_t =
+                problem.tangential_jacobian.block(3 * i, 0, 3, nv) * solution.velocity;
+            contact_scale = std::max(contact_scale, std::abs(u_n));
+            contact_scale = std::max(contact_scale, u_t.lpNorm<Eigen::Infinity>());
+            contact_scale = std::max(contact_scale, std::abs(solution.lambda_n(i)));
+            contact_scale = std::max(
+                contact_scale,
+                solution.lambda_t.segment<3>(3 * i).lpNorm<Eigen::Infinity>());
+            contact_scale = std::max(contact_scale, std::abs(solution.slack(i)));
+            contact_scale = std::max(
+                contact_scale,
+                std::abs(problem.friction_coefficients(i) * solution.lambda_n(i)));
+        }
+
+        const double momentum_scale = std::max(
+            1.0,
+            momentum_balance.lpNorm<Eigen::Infinity>());
+        const double state_scale = std::max(
+            {
+                1.0,
+                solution.velocity.lpNorm<Eigen::Infinity>(),
+                problem.free_velocity.lpNorm<Eigen::Infinity>(),
+                solution.lambda_n.lpNorm<Eigen::Infinity>(),
+                solution.lambda_t.lpNorm<Eigen::Infinity>()
+            });
+        const double scale = std::max({1.0, momentum_scale, contact_scale, state_scale});
+        return raw / scale;
+    }
+
+    static double computeComplementarityViolation(const SOCCPProblem& problem,
+                                                  const SOCCPSolution& solution) {
+        const int nv = problem.velocityDofs();
+        const int nc = problem.numContacts();
+        if (solution.velocity.size() != nv ||
+            solution.lambda_n.size() != nc ||
+            solution.lambda_t.size() != 3 * nc ||
+            solution.slack.size() != nc) {
+            return 0.0;
+        }
+
+        double violation = 0.0;
+        for (int i = 0; i < nc; ++i) {
+            const double lambda_scale =
+                std::max(1.0, std::abs(solution.lambda_n(i)));
+            violation = std::max(
+                violation,
+                std::max(0.0, -solution.lambda_n(i)) / lambda_scale);
+            const Eigen::Vector3d u_t =
+                problem.tangential_jacobian.block(3 * i, 0, 3, nv) * solution.velocity;
+            if (torsionEnabled(problem, i)) {
+                const Vector4d x = makeFrictionConeVector(
+                    problem.friction_coefficients(i),
+                    solution.lambda_n(i),
+                    solution.lambda_t.segment<3>(3 * i));
+                const Vector4d y = makeDualConeVector(solution.slack(i), u_t);
+                const double local_scale = std::max(
+                    {
+                        1.0,
+                        x.lpNorm<Eigen::Infinity>(),
+                        y.lpNorm<Eigen::Infinity>()
+                    });
+                violation = std::max(
+                    violation,
+                    naturalResidual(x, y).lpNorm<Eigen::Infinity>() / local_scale);
+            } else {
+                Vector4d x = Vector4d::Zero();
+                Vector4d y = Vector4d::Zero();
+                x(0) = problem.friction_coefficients(i) * solution.lambda_n(i);
+                x(1) = solution.lambda_t(3 * i + 0);
+                x(2) = solution.lambda_t(3 * i + 1);
+                y(0) = solution.slack(i);
+                y(1) = u_t(0);
+                y(2) = u_t(1);
+                const double local_scale = std::max(
+                    {
+                        1.0,
+                        x.head<3>().lpNorm<Eigen::Infinity>(),
+                        y.head<3>().lpNorm<Eigen::Infinity>()
+                    });
+                violation = std::max(
+                    violation,
+                    naturalResidual(x, y).head<3>().lpNorm<Eigen::Infinity>() / local_scale);
+                violation = std::max(
+                    violation,
+                    std::abs(solution.lambda_t(3 * i + 2)) /
+                        std::max(1.0, std::abs(solution.lambda_t(3 * i + 2))));
+            }
+        }
+
+        return violation;
     }
 
 private:

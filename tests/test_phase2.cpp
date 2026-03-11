@@ -15,11 +15,26 @@
 #include "math/JordanAlgebra.h"
 #include "math/FischerBurmeister.h"
 #include "dynamics/ContactDynamics.h"
+#include "solver/FourDPGSSolver.h"
+#include "solver/FrictionPGSSolver.h"
 #include "solver/NormalLCPSolver.h"
+#include "solver/PolyhedralFrictionSolver.h"
 #include "solver/SemiSmoothNewton.h"
 #include "solver/SOCCPSolver.h"
 
 using namespace vde;
+
+RigidBodyProperties makeCylinderProps(double mass, double radius, double height) {
+    RigidBodyProperties props;
+    props.mass = mass;
+    const double i_axis = 0.5 * mass * radius * radius;
+    const double i_radial = (mass / 12.0) * (3.0 * radius * radius + height * height);
+    props.inertia_local.setZero();
+    props.inertia_local(0, 0) = i_radial;
+    props.inertia_local(1, 1) = i_axis;
+    props.inertia_local(2, 2) = i_radial;
+    return props;
+}
 
 SOCCPProblem makeReferenceSOCCPProblem() {
     ContactConstraint constraint;
@@ -637,6 +652,353 @@ bool testNormalLCPMatchesSOCCPNormalOnly() {
     return passed;
 }
 
+bool testFrictionPGSMatchesSOCCP3D() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Friction PGS vs SOCCP 3D Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    Eigen::MatrixXd mass_matrix = Eigen::MatrixXd::Identity(3, 3);
+    Eigen::VectorXd free_velocity(3);
+    free_velocity << 0.0, -0.2, -1.0;
+
+    Eigen::MatrixXd Jn(1, 3);
+    Jn << 0.0, 1.0, 0.0;
+    Eigen::MatrixXd Jt2 = Eigen::MatrixXd::Zero(2, 3);
+    Jt2 << 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0;
+
+    FrictionPGSProblem pgs_problem;
+    pgs_problem.mass_matrix = mass_matrix;
+    pgs_problem.free_velocity = free_velocity;
+    pgs_problem.normal_jacobian = Jn;
+    pgs_problem.tangential_jacobian = Jt2;
+    pgs_problem.g_eq = Eigen::VectorXd::Constant(1, -1e-3);
+    pgs_problem.friction_coefficients = Eigen::VectorXd::Constant(1, 0.4);
+    pgs_problem.baumgarte_gamma = Eigen::VectorXd::Zero(1);
+    pgs_problem.time_step = 1.0;
+
+    SOCCPProblem soccp_problem;
+    soccp_problem.mass_matrix = mass_matrix;
+    soccp_problem.free_velocity = free_velocity;
+    soccp_problem.normal_jacobian = Jn;
+    soccp_problem.tangential_jacobian = Eigen::MatrixXd::Zero(3, 3);
+    soccp_problem.tangential_jacobian.block(0, 0, 2, 3) = Jt2;
+    soccp_problem.g_eq = pgs_problem.g_eq;
+    soccp_problem.friction_coefficients = pgs_problem.friction_coefficients;
+    soccp_problem.baumgarte_gamma = pgs_problem.baumgarte_gamma;
+    soccp_problem.torsion_enabled = Eigen::ArrayXi::Zero(1);
+    soccp_problem.time_step = 1.0;
+    soccp_problem.epsilon = 1e-8;
+
+    FrictionPGSSolver pgs_solver(50, 1e-10);
+    FrictionPGSSolution pgs_solution;
+    const bool pgs_converged = pgs_solver.solve(pgs_problem, pgs_solution);
+
+    SOCCPSolver soccp_solver(100, 1e-10, soccp_problem.epsilon);
+    SOCCPSolution soccp_solution;
+    const bool soccp_converged = soccp_solver.solve(soccp_problem, soccp_solution);
+
+    const double lambda_n_error = std::abs(pgs_solution.lambda_n(0) - soccp_solution.lambda_n(0));
+    const double lambda_t_error =
+        (pgs_solution.lambda_t - soccp_solution.lambda_t.head(2)).norm();
+    const double velocity_error =
+        (pgs_solution.velocity - soccp_solution.velocity).norm();
+    const double pgs_residual = pgs_solution.residual.lpNorm<Eigen::Infinity>();
+    const double soccp_residual = soccp_solution.residual.lpNorm<Eigen::Infinity>();
+
+    std::cout << "PGS converged: " << (pgs_converged ? "YES" : "NO") << std::endl;
+    std::cout << "SOCCP converged: " << (soccp_converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_n_pgs: " << pgs_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_n_soccp: " << soccp_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_t_pgs: " << pgs_solution.lambda_t.transpose() << std::endl;
+    std::cout << "lambda_t_soccp: " << soccp_solution.lambda_t.head(2).transpose() << std::endl;
+    std::cout << "lambda_n_error: " << lambda_n_error << std::endl;
+    std::cout << "lambda_t_error: " << lambda_t_error << std::endl;
+    std::cout << "velocity_error: " << velocity_error << std::endl;
+    std::cout << "pgs_residual_inf: " << pgs_residual << std::endl;
+    std::cout << "soccp_residual_inf: " << soccp_residual << std::endl;
+
+    const bool passed =
+        pgs_converged &&
+        soccp_converged &&
+        lambda_n_error < 1e-7 &&
+        lambda_t_error < 1e-7 &&
+        velocity_error < 1e-7 &&
+        pgs_residual < 1e-8 &&
+        soccp_residual < 1e-7;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testPolyhedralFrictionMatchesSOCCP3D() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Polyhedral Friction Feasibility vs SOCCP 3D Cap Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    Eigen::MatrixXd mass_matrix = Eigen::MatrixXd::Identity(3, 3);
+    Eigen::VectorXd free_velocity(3);
+    free_velocity << 0.0, -0.2, -1.0;
+
+    Eigen::MatrixXd Jn(1, 3);
+    Jn << 0.0, 1.0, 0.0;
+    Eigen::MatrixXd Jt2 = Eigen::MatrixXd::Zero(2, 3);
+    Jt2 << 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0;
+
+    PolyhedralFrictionProblem poly_problem;
+    poly_problem.mass_matrix = mass_matrix;
+    poly_problem.free_velocity = free_velocity;
+    poly_problem.normal_jacobian = Jn;
+    poly_problem.tangential_jacobian = Jt2;
+    poly_problem.g_eq = Eigen::VectorXd::Constant(1, -1e-3);
+    poly_problem.friction_coefficients = Eigen::VectorXd::Constant(1, 0.4);
+    poly_problem.baumgarte_gamma = Eigen::VectorXd::Zero(1);
+    poly_problem.time_step = 1.0;
+    poly_problem.num_directions = 16;
+
+    SOCCPProblem soccp_problem;
+    soccp_problem.mass_matrix = mass_matrix;
+    soccp_problem.free_velocity = free_velocity;
+    soccp_problem.normal_jacobian = Jn;
+    soccp_problem.tangential_jacobian = Eigen::MatrixXd::Zero(3, 3);
+    soccp_problem.tangential_jacobian.block(0, 0, 2, 3) = Jt2;
+    soccp_problem.g_eq = poly_problem.g_eq;
+    soccp_problem.friction_coefficients = poly_problem.friction_coefficients;
+    soccp_problem.baumgarte_gamma = poly_problem.baumgarte_gamma;
+    soccp_problem.torsion_enabled = Eigen::ArrayXi::Zero(1);
+    soccp_problem.time_step = 1.0;
+    soccp_problem.epsilon = 1e-8;
+
+    PolyhedralFrictionSolver poly_solver(500, 1e-10);
+    PolyhedralFrictionSolution poly_solution;
+    const bool poly_converged = poly_solver.solve(poly_problem, poly_solution);
+
+    SOCCPSolver soccp_solver(100, 1e-10, soccp_problem.epsilon);
+    SOCCPSolution soccp_solution;
+    const bool soccp_converged = soccp_solver.solve(soccp_problem, soccp_solution);
+
+    const double lambda_n_error =
+        std::abs(poly_solution.lambda_n(0) - soccp_solution.lambda_n(0));
+    const double lambda_t_norm_error =
+        std::abs(poly_solution.lambda_t.norm() - soccp_solution.lambda_t.head(2).norm());
+    const Eigen::Vector2d free_tangent(free_velocity(0), free_velocity(2));
+    const double tangential_dissipation = poly_solution.lambda_t.dot(free_tangent);
+
+    std::cout << "Polyhedral converged: " << (poly_converged ? "YES" : "NO") << std::endl;
+    std::cout << "SOCCP converged: " << (soccp_converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_n_poly: " << poly_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_n_soccp: " << soccp_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_t_poly: " << poly_solution.lambda_t.transpose() << std::endl;
+    std::cout << "lambda_t_soccp: " << soccp_solution.lambda_t.head(2).transpose() << std::endl;
+    std::cout << "lambda_n_error: " << lambda_n_error << std::endl;
+    std::cout << "lambda_t_norm_error: " << lambda_t_norm_error << std::endl;
+    std::cout << "tangential_dissipation: " << tangential_dissipation << std::endl;
+    std::cout << "poly_scaled_residual: " << poly_solution.scaled_residual << std::endl;
+    std::cout << "soccp_scaled_residual: " << soccp_solution.scaled_residual << std::endl;
+    std::cout << "poly_complementarity: " << poly_solution.complementarity_violation << std::endl;
+    std::cout << "soccp_complementarity: " << soccp_solution.complementarity_violation << std::endl;
+
+    const bool passed =
+        soccp_converged &&
+        lambda_n_error < 1e-7 &&
+        lambda_t_norm_error < 1e-7 &&
+        tangential_dissipation <= 1e-8 &&
+        poly_solution.scaled_residual < 4e-2 &&
+        poly_solution.complementarity_violation < 4e-2 &&
+        soccp_solution.scaled_residual < 1e-7 &&
+        soccp_solution.complementarity_violation < 1e-7;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testSOCCP4DTorsionReferenceStep() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "SOCCP 4D Torsion Reference Step Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    constexpr double mass = 3.0;
+    constexpr double radius = 0.45;
+    constexpr double height = 0.24;
+    constexpr double friction = 0.35;
+    constexpr double gravity = 9.81;
+    constexpr double torsion_radius = 0.30;
+    constexpr double dt = 0.01;
+    constexpr double omega0 = 10.0;
+
+    const RigidBodyProperties props = makeCylinderProps(mass, radius, height);
+    Eigen::MatrixXd mass_matrix = Eigen::MatrixXd::Zero(6, 6);
+    mass_matrix.diagonal() << mass, mass, mass,
+                               props.inertia_local(0, 0),
+                               props.inertia_local(1, 1),
+                               props.inertia_local(2, 2);
+
+    Eigen::VectorXd free_velocity = Eigen::VectorXd::Zero(6);
+    free_velocity(1) = -gravity * dt;
+    free_velocity(4) = omega0;
+
+    SOCCPProblem problem;
+    problem.mass_matrix = mass_matrix;
+    problem.free_velocity = free_velocity;
+    problem.normal_jacobian = Eigen::MatrixXd::Zero(1, 6);
+    problem.normal_jacobian(0, 1) = 1.0;
+    problem.tangential_jacobian = Eigen::MatrixXd::Zero(3, 6);
+    problem.tangential_jacobian(2, 4) = torsion_radius;
+    problem.g_eq = Eigen::VectorXd::Zero(1);
+    problem.friction_coefficients = Eigen::VectorXd::Constant(1, friction);
+    problem.baumgarte_gamma = Eigen::VectorXd::Zero(1);
+    problem.torsion_enabled = Eigen::ArrayXi::Ones(1);
+    problem.time_step = dt;
+    problem.epsilon = 1e-8;
+
+    SOCCPSolver solver(100, 1e-10, problem.epsilon);
+    SOCCPSolution solution;
+    const bool converged = solver.solve(problem, solution);
+
+    const double lambda_n_expected = mass * gravity;
+    const double lambda_tau_expected = friction * lambda_n_expected;
+    const double omega_expected =
+        omega0 - dt * lambda_tau_expected * torsion_radius / props.inertia_local(1, 1);
+
+    const double lambda_n_error = std::abs(solution.lambda_n(0) - lambda_n_expected);
+    const double lambda_tau_error = std::abs(std::abs(solution.lambda_t(2)) - lambda_tau_expected);
+    const double omega_error = std::abs(solution.velocity(4) - omega_expected);
+    const double vy_error = std::abs(solution.velocity(1));
+    const double residual_inf = solution.residual.lpNorm<Eigen::Infinity>();
+
+    std::cout << "Converged: " << (converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_n: " << solution.lambda_n(0)
+              << " (expected " << lambda_n_expected << ")" << std::endl;
+    std::cout << "lambda_tau: " << solution.lambda_t(2)
+              << " (expected magnitude " << lambda_tau_expected << ")" << std::endl;
+    std::cout << "omega_next: " << solution.velocity(4)
+              << " (expected " << omega_expected << ")" << std::endl;
+    std::cout << "lambda_n_error: " << lambda_n_error << std::endl;
+    std::cout << "lambda_tau_error: " << lambda_tau_error << std::endl;
+    std::cout << "omega_error: " << omega_error << std::endl;
+    std::cout << "vy_error: " << vy_error << std::endl;
+    std::cout << "residual_inf: " << residual_inf << std::endl;
+
+    const bool passed =
+        converged &&
+        lambda_n_error < 1e-7 &&
+        lambda_tau_error < 1e-7 &&
+        omega_error < 1e-7 &&
+        vy_error < 1e-9 &&
+        residual_inf < 1e-7;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testFourDPGSMatchesSOCCP4D() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "FourD PGS vs SOCCP 4D Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    constexpr double mass = 2.5;
+    constexpr double radius = 0.36;
+    constexpr double height = 0.20;
+    constexpr double friction = 0.42;
+    constexpr double gravity = 9.81;
+    constexpr double torsion_radius = 0.28;
+    constexpr double dt = 0.01;
+
+    const RigidBodyProperties props = makeCylinderProps(mass, radius, height);
+    Eigen::MatrixXd mass_matrix = Eigen::MatrixXd::Zero(6, 6);
+    mass_matrix.diagonal() << mass, mass, mass,
+                               props.inertia_local(0, 0),
+                               props.inertia_local(1, 1),
+                               props.inertia_local(2, 2);
+
+    Eigen::VectorXd free_velocity = Eigen::VectorXd::Zero(6);
+    free_velocity(0) = 0.80;
+    free_velocity(1) = -gravity * dt;
+    free_velocity(2) = -0.35;
+    free_velocity(4) = 6.0;
+
+    Eigen::MatrixXd Jn = Eigen::MatrixXd::Zero(1, 6);
+    Jn(0, 1) = 1.0;
+    Eigen::MatrixXd Jt = Eigen::MatrixXd::Zero(3, 6);
+    Jt(0, 0) = 1.0;
+    Jt(1, 2) = 1.0;
+    Jt(2, 4) = torsion_radius;
+
+    SOCCPProblem soccp_problem;
+    soccp_problem.mass_matrix = mass_matrix;
+    soccp_problem.free_velocity = free_velocity;
+    soccp_problem.normal_jacobian = Jn;
+    soccp_problem.tangential_jacobian = Jt;
+    soccp_problem.g_eq = Eigen::VectorXd::Zero(1);
+    soccp_problem.friction_coefficients = Eigen::VectorXd::Constant(1, friction);
+    soccp_problem.baumgarte_gamma = Eigen::VectorXd::Zero(1);
+    soccp_problem.torsion_enabled = Eigen::ArrayXi::Ones(1);
+    soccp_problem.time_step = dt;
+    soccp_problem.epsilon = 1e-8;
+
+    FourDPGSProblem pgs_problem;
+    pgs_problem.mass_matrix = mass_matrix;
+    pgs_problem.free_velocity = free_velocity;
+    pgs_problem.normal_jacobian = Jn;
+    pgs_problem.tangential_jacobian = Jt;
+    pgs_problem.g_eq = Eigen::VectorXd::Zero(1);
+    pgs_problem.friction_coefficients = Eigen::VectorXd::Constant(1, friction);
+    pgs_problem.baumgarte_gamma = Eigen::VectorXd::Zero(1);
+    pgs_problem.time_step = dt;
+
+    SOCCPSolver soccp_solver(100, 1e-10, soccp_problem.epsilon);
+    SOCCPSolution soccp_solution;
+    const bool soccp_converged = soccp_solver.solve(soccp_problem, soccp_solution);
+
+    FourDPGSSolver pgs_solver(200, 1e-10);
+    FourDPGSSolution pgs_solution;
+    const bool pgs_converged = pgs_solver.solve(pgs_problem, pgs_solution);
+
+    const double lambda_n_error = std::abs(pgs_solution.lambda_n(0) - soccp_solution.lambda_n(0));
+    const double lambda_t_error =
+        (pgs_solution.lambda_t - soccp_solution.lambda_t).norm();
+    const double velocity_error =
+        (pgs_solution.velocity - soccp_solution.velocity).norm();
+    const double lambda_t_scale = std::max(
+        1.0,
+        std::max(
+            pgs_solution.lambda_t.norm(),
+            soccp_solution.lambda_t.norm()));
+    const double velocity_scale = std::max(
+        1.0,
+        std::max(
+            pgs_solution.velocity.norm(),
+            soccp_solution.velocity.norm()));
+    const double lambda_t_relative_error = lambda_t_error / lambda_t_scale;
+    const double velocity_relative_error = velocity_error / velocity_scale;
+
+    std::cout << "PGS converged: " << (pgs_converged ? "YES" : "NO") << std::endl;
+    std::cout << "SOCCP converged: " << (soccp_converged ? "YES" : "NO") << std::endl;
+    std::cout << "lambda_n_pgs: " << pgs_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_n_soccp: " << soccp_solution.lambda_n.transpose() << std::endl;
+    std::cout << "lambda_t_pgs: " << pgs_solution.lambda_t.transpose() << std::endl;
+    std::cout << "lambda_t_soccp: " << soccp_solution.lambda_t.transpose() << std::endl;
+    std::cout << "lambda_n_error: " << lambda_n_error << std::endl;
+    std::cout << "lambda_t_error: " << lambda_t_error << std::endl;
+    std::cout << "lambda_t_relative_error: " << lambda_t_relative_error << std::endl;
+    std::cout << "velocity_error: " << velocity_error << std::endl;
+    std::cout << "velocity_relative_error: " << velocity_relative_error << std::endl;
+    std::cout << "pgs_scaled_residual: " << pgs_solution.scaled_residual << std::endl;
+    std::cout << "soccp_scaled_residual: " << soccp_solution.scaled_residual << std::endl;
+    std::cout << "pgs_complementarity: " << pgs_solution.complementarity_violation << std::endl;
+    std::cout << "soccp_complementarity: " << soccp_solution.complementarity_violation << std::endl;
+
+    const bool passed =
+        pgs_converged &&
+        soccp_converged &&
+        lambda_n_error < 1e-7 &&
+        lambda_t_relative_error < 1e-1 &&
+        velocity_relative_error < 2e-3 &&
+        pgs_solution.complementarity_violation < 1e-8 &&
+        soccp_solution.complementarity_violation < 1e-7;
+
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 2 Acceptance Tests" << std::endl;
@@ -652,6 +1014,10 @@ int main() {
     bool soccp_scalar_lcp_test = testSOCCPScalarLCPDegeneracy();
     bool normal_lcp_global_test = testNormalLCPGlobalSolve();
     bool normal_lcp_soccp_match_test = testNormalLCPMatchesSOCCPNormalOnly();
+    bool friction_pgs_soccp_match_test = testFrictionPGSMatchesSOCCP3D();
+    bool polyhedral_soccp_match_test = testPolyhedralFrictionMatchesSOCCP3D();
+    bool soccp_4d_torsion_ref_test = testSOCCP4DTorsionReferenceStep();
+    bool four_d_pgs_soccp_match_test = testFourDPGSMatchesSOCCP4D();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 2 Acceptance Summary" << std::endl;
@@ -666,6 +1032,10 @@ int main() {
     std::cout << "SOCCP Scalar LCP Degeneracy: " << (soccp_scalar_lcp_test ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Normal LCP Global Solve: " << (normal_lcp_global_test ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Normal LCP vs SOCCP Normal-Only: " << (normal_lcp_soccp_match_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Friction PGS vs SOCCP 3D: " << (friction_pgs_soccp_match_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Polyhedral Friction vs SOCCP 3D: " << (polyhedral_soccp_match_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "SOCCP 4D Torsion Reference Step: " << (soccp_4d_torsion_ref_test ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "FourD PGS vs SOCCP 4D: " << (four_d_pgs_soccp_match_test ? "PASSED" : "FAILED") << std::endl;
 
     bool all_passed =
         jordan_test &&
@@ -677,7 +1047,11 @@ int main() {
         soccp_3d_branch_test &&
         soccp_scalar_lcp_test &&
         normal_lcp_global_test &&
-        normal_lcp_soccp_match_test;
+        normal_lcp_soccp_match_test &&
+        friction_pgs_soccp_match_test &&
+        polyhedral_soccp_match_test &&
+        soccp_4d_torsion_ref_test &&
+        four_d_pgs_soccp_match_test;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;

@@ -9,6 +9,7 @@
 #include <random>
 #include <cmath>
 #include "geometry/AnalyticalSDF.h"
+#include "geometry/MeshSDF.h"
 
 using namespace vde;
 
@@ -180,6 +181,42 @@ bool testHalfSpaceSDF() {
     return max_norm_error < 1e-6 && max_direction_error < 1e-10;
 }
 
+bool testMeshSDFBoxAgreement() {
+    std::cout << "=== Testing MeshSDF Box Agreement ===" << std::endl;
+
+    const Eigen::Vector3d min_corner(-1.0, -0.8, -0.6);
+    const Eigen::Vector3d max_corner(1.0, 0.8, 0.6);
+    const BoxSDF analytic_box(min_corner, max_corner);
+    const MeshSDF mesh_box(TriangleMesh::makeBox(min_corner, max_corner));
+
+    const std::vector<Eigen::Vector3d> samples = {
+        Eigen::Vector3d(0.6, 0.0, 0.0),
+        Eigen::Vector3d(0.9, 0.0, 0.0),
+        Eigen::Vector3d(1.4, 0.2, 0.1),
+        Eigen::Vector3d(-1.3, 0.6, 0.0),
+        Eigen::Vector3d(0.0, 1.1, 0.0),
+        Eigen::Vector3d(0.3, -0.4, 0.55),
+        Eigen::Vector3d(-0.6, 0.7, -0.2)
+    };
+
+    double max_phi_error = 0.0;
+    double max_grad_error = 0.0;
+    for (const auto& x : samples) {
+        const double phi_analytic = analytic_box.phi(x);
+        const double phi_mesh = mesh_box.phi(x);
+        const Eigen::Vector3d grad_analytic = analytic_box.gradient(x);
+        const Eigen::Vector3d grad_mesh = mesh_box.gradient(x);
+
+        max_phi_error = std::max(max_phi_error, std::abs(phi_analytic - phi_mesh));
+        max_grad_error = std::max(max_grad_error, (grad_analytic - grad_mesh).norm());
+    }
+
+    std::cout << "  Max phi error: " << max_phi_error << std::endl;
+    std::cout << "  Max gradient error: " << max_grad_error << std::endl;
+
+    return max_phi_error < 5e-6 && max_grad_error < 5e-3;
+}
+
 /**
  * @brief Test sphere-plane contact case
  *
@@ -228,6 +265,9 @@ int main() {
     std::cout << std::endl;
 
     all_passed &= testHalfSpaceSDF();
+    std::cout << std::endl;
+
+    all_passed &= testMeshSDFBoxAgreement();
     std::cout << std::endl;
 
     all_passed &= testSpherePlaneContact();

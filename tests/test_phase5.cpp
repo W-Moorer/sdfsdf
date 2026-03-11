@@ -21,8 +21,17 @@
 #include <vector>
 #include <chrono>
 #include "engine/SimulationEngine.h"
+#include "geometry/MeshSDF.h"
 
 using namespace vde;
+
+double maxContactPenetration(const std::vector<ContactPair>& contacts) {
+    double max_penetration = 0.0;
+    for (const auto& contact : contacts) {
+        max_penetration = std::max(max_penetration, -contact.geometry.g_eq);
+    }
+    return max_penetration;
+}
 
 /**
  * @brief Create a sphere rigid body
@@ -525,6 +534,304 @@ bool testEngineNormalLCPBaseline() {
     return passed;
 }
 
+bool testEngineMeshSDFConsistency() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Engine Mesh-SDF Consistency Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    auto makeEngine = []() {
+        SimulationConfig config;
+        config.time_step = 0.0025;
+        config.gravity = Eigen::Vector3d(0.0, -9.81, 0.0);
+        config.enable_friction = false;
+        config.enable_torsional_friction = false;
+        config.baumgarte_gamma = 0.0;
+        config.contact_grid_resolution = 28;
+        config.contact_p_norm = 2.0;
+        config.max_solver_iterations = 180;
+        config.solver_tolerance = 1e-8;
+        config.solver_mode = ContactSolverMode::SOCCP;
+        return SimulationEngine(config);
+    };
+
+    auto addScene = [](SimulationEngine& engine, bool use_mesh, std::shared_ptr<RigidBody>& body_out) {
+        constexpr double radius = 0.20;
+        constexpr double support_width = 12.0;
+        constexpr double support_height = 2.0;
+        constexpr double support_depth = 12.0;
+        const Eigen::Vector3d half_extents(
+            0.5 * support_width,
+            0.5 * support_height,
+            0.5 * support_depth);
+
+        body_out = std::make_shared<RigidBody>(
+            RigidBodyProperties::sphere(1.0, radius));
+        body_out->setPosition(Eigen::Vector3d(0.0, 2.0, 0.0));
+
+        auto support = std::make_shared<RigidBody>();
+        support->setStatic(true);
+        support->setPosition(Eigen::Vector3d(0.0, -0.5 * support_height, 0.0));
+
+        auto sphere_sdf = std::make_shared<SphereSDF>(Eigen::Vector3d::Zero(), radius);
+        std::shared_ptr<SDF> support_sdf;
+        if (use_mesh) {
+            support_sdf = std::make_shared<MeshSDF>(TriangleMesh::makeBox(-half_extents, half_extents));
+        } else {
+            support_sdf = std::make_shared<BoxSDF>(-half_extents, half_extents);
+        }
+        const AABB sphere_aabb(
+            Eigen::Vector3d::Constant(-radius),
+            Eigen::Vector3d::Constant(radius));
+        const AABB support_aabb(-half_extents, half_extents);
+
+        engine.addBody(body_out, sphere_sdf, sphere_aabb);
+        engine.addBody(support, support_sdf, support_aabb);
+    };
+
+    SimulationEngine analytic_engine = makeEngine();
+    SimulationEngine mesh_engine = makeEngine();
+    std::shared_ptr<RigidBody> analytic_body;
+    std::shared_ptr<RigidBody> mesh_body;
+    addScene(analytic_engine, false, analytic_body);
+    addScene(mesh_engine, true, mesh_body);
+
+    constexpr int num_steps = 240;
+    double max_center_y_diff = 0.0;
+    double max_vy_diff = 0.0;
+
+    for (int step = 0; step < num_steps; ++step) {
+        analytic_engine.step();
+        mesh_engine.step();
+        max_center_y_diff = std::max(
+            max_center_y_diff,
+            std::abs(analytic_body->position().y() - mesh_body->position().y()));
+        max_vy_diff = std::max(
+            max_vy_diff,
+            std::abs(analytic_body->linearVelocity().y() - mesh_body->linearVelocity().y()));
+    }
+
+    std::cout << "Max center-y difference: " << max_center_y_diff << std::endl;
+    std::cout << "Max vy difference: " << max_vy_diff << std::endl;
+
+    const bool passed = max_center_y_diff < 2e-3 && max_vy_diff < 2e-3;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testEngineMeshSDFMultiContactConsistency() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Engine Mesh-SDF Multi-Contact Consistency Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    auto makeEngine = []() {
+        SimulationConfig config;
+        config.time_step = 0.01;
+        config.gravity = Eigen::Vector3d(0.0, -9.81, 0.0);
+        config.enable_friction = false;
+        config.enable_torsional_friction = false;
+        config.baumgarte_gamma = 0.10;
+        config.contact_grid_resolution = 28;
+        config.contact_p_norm = 2.0;
+        config.max_solver_iterations = 160;
+        config.solver_tolerance = 1e-8;
+        config.solver_mode = ContactSolverMode::SOCCP;
+        return SimulationEngine(config);
+    };
+
+    auto addMultiContactScene = [](SimulationEngine& engine, bool use_mesh, std::shared_ptr<RigidBody>& upper_body_out) {
+        constexpr double box_size = 0.5;
+        constexpr double half = 0.25;
+
+        auto lower_box = std::make_shared<RigidBody>(RigidBodyProperties::box(10.0, box_size, box_size, box_size));
+        lower_box->setPosition(Eigen::Vector3d(0.0, 0.23, 0.0));
+        upper_body_out = std::make_shared<RigidBody>(RigidBodyProperties::box(1.0, box_size, box_size, box_size));
+        upper_body_out->setPosition(Eigen::Vector3d(0.0, 0.71, 0.0));
+        auto ground = std::make_shared<RigidBody>();
+        ground->setStatic(true);
+
+        const std::shared_ptr<SDF> box_sdf = use_mesh
+            ? std::static_pointer_cast<SDF>(
+                std::make_shared<MeshSDF>(TriangleMesh::makeBox(
+                    Eigen::Vector3d::Constant(-half),
+                    Eigen::Vector3d::Constant(half))))
+            : std::static_pointer_cast<SDF>(
+                std::make_shared<BoxSDF>(
+                    Eigen::Vector3d::Constant(-half),
+                    Eigen::Vector3d::Constant(half)));
+        const auto ground_sdf = std::make_shared<HalfSpaceSDF>(
+            Eigen::Vector3d(0.0, 1.0, 0.0),
+            Eigen::Vector3d::Zero());
+        const AABB box_aabb(
+            Eigen::Vector3d::Constant(-half),
+            Eigen::Vector3d::Constant(half));
+        const AABB ground_aabb =
+            VolumetricIntegrator::halfSpaceAABB(*ground_sdf, Eigen::Vector3d::Zero(), 3.0);
+
+        engine.addBody(lower_box, box_sdf, box_aabb);
+        engine.addBody(upper_body_out, box_sdf, box_aabb);
+        engine.addBody(ground, ground_sdf, ground_aabb);
+    };
+
+    SimulationEngine analytic_engine = makeEngine();
+    SimulationEngine mesh_engine = makeEngine();
+    std::shared_ptr<RigidBody> analytic_body;
+    std::shared_ptr<RigidBody> mesh_body;
+    addMultiContactScene(analytic_engine, false, analytic_body);
+    addMultiContactScene(mesh_engine, true, mesh_body);
+
+    constexpr int num_steps = 50;
+    double max_upper_y_diff = 0.0;
+    double max_upper_vy_diff = 0.0;
+    double max_penetration_diff = 0.0;
+    double max_contact_diff = 0.0;
+
+    for (int step = 0; step < num_steps; ++step) {
+        analytic_engine.step();
+        mesh_engine.step();
+        max_upper_y_diff = std::max(
+            max_upper_y_diff,
+            std::abs(analytic_body->position().y() - mesh_body->position().y()));
+        max_upper_vy_diff = std::max(
+            max_upper_vy_diff,
+            std::abs(analytic_body->linearVelocity().y() - mesh_body->linearVelocity().y()));
+        max_penetration_diff = std::max(
+            max_penetration_diff,
+            std::abs(maxContactPenetration(analytic_engine.getContacts()) -
+                     maxContactPenetration(mesh_engine.getContacts())));
+        max_contact_diff = std::max(
+            max_contact_diff,
+            std::abs(
+                static_cast<double>(analytic_engine.getContacts().size()) -
+                static_cast<double>(mesh_engine.getContacts().size())));
+    }
+
+    std::cout << "Max upper-y difference: " << max_upper_y_diff << std::endl;
+    std::cout << "Max upper-vy difference: " << max_upper_vy_diff << std::endl;
+    std::cout << "Max penetration difference: " << max_penetration_diff << std::endl;
+    std::cout << "Max contact-count difference: " << max_contact_diff << std::endl;
+
+    const bool passed =
+        max_upper_y_diff < 5e-3 &&
+        max_upper_vy_diff < 5e-3 &&
+        max_penetration_diff < 5e-3 &&
+        max_contact_diff < 1.0;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
+bool testEnginePolyhedralFrictionBaseline() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Engine Polyhedral Friction Baseline Test" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    auto makeEngine = [](ContactSolverMode mode) {
+        SimulationConfig config;
+        config.time_step = 0.005;
+        config.gravity = Eigen::Vector3d(0.0, -9.81, 0.0);
+        config.enable_friction = true;
+        config.enable_torsional_friction = false;
+        config.friction_coefficient = 0.35;
+        config.baumgarte_gamma = 0.0;
+        config.contact_grid_resolution = 36;
+        config.contact_p_norm = 2.0;
+        config.max_solver_iterations = 120;
+        config.solver_tolerance = 1e-8;
+        config.polyhedral_friction_directions = 8;
+        config.solver_mode = mode;
+        return SimulationEngine(config);
+    };
+
+    auto addSlidingBoxScene = [](SimulationEngine& engine, std::shared_ptr<RigidBody>& box_out) {
+        constexpr double box_w = 0.80;
+        constexpr double box_h = 0.20;
+        constexpr double box_d = 0.55;
+        constexpr double ground_w = 8.0;
+        constexpr double ground_h = 1.0;
+        constexpr double ground_d = 8.0;
+
+        box_out = std::make_shared<RigidBody>(
+            RigidBodyProperties::box(2.4, box_w, box_h, box_d));
+        box_out->setPosition(Eigen::Vector3d(0.0, 0.5 * box_h - 0.02, 0.0));
+        box_out->setLinearVelocity(Eigen::Vector3d(0.35, 0.0, -0.10));
+        box_out->setAngularVelocity(Eigen::Vector3d::Zero());
+        box_out->state().orientation =
+            Eigen::Quaterniond(Eigen::AngleAxisd(12.0 * M_PI / 180.0, Eigen::Vector3d::UnitY()));
+
+        auto ground = std::make_shared<RigidBody>(
+            RigidBodyProperties::box(1.0, ground_w, ground_h, ground_d));
+        ground->setStatic(true);
+        ground->setPosition(Eigen::Vector3d(0.0, -0.5 * ground_h, 0.0));
+
+        auto box_sdf = std::make_shared<BoxSDF>(
+            Eigen::Vector3d(-0.5 * box_w, -0.5 * box_h, -0.5 * box_d),
+            Eigen::Vector3d(0.5 * box_w, 0.5 * box_h, 0.5 * box_d));
+        auto ground_sdf = std::make_shared<BoxSDF>(
+            Eigen::Vector3d(-0.5 * ground_w, -0.5 * ground_h, -0.5 * ground_d),
+            Eigen::Vector3d(0.5 * ground_w, 0.5 * ground_h, 0.5 * ground_d));
+
+        const AABB box_aabb(
+            Eigen::Vector3d(-0.5 * box_w, -0.5 * box_h, -0.5 * box_d),
+            Eigen::Vector3d(0.5 * box_w, 0.5 * box_h, 0.5 * box_d));
+        const AABB ground_aabb(
+            Eigen::Vector3d(-0.5 * ground_w, -0.5 * ground_h, -0.5 * ground_d),
+            Eigen::Vector3d(0.5 * ground_w, 0.5 * ground_h, 0.5 * ground_d));
+
+        engine.addBody(box_out, box_sdf, box_aabb);
+        engine.addBody(ground, ground_sdf, ground_aabb);
+    };
+
+    SimulationEngine soccp_engine = makeEngine(ContactSolverMode::SOCCP);
+    SimulationEngine poly_engine = makeEngine(ContactSolverMode::PolyhedralFriction);
+    std::shared_ptr<RigidBody> soccp_box;
+    std::shared_ptr<RigidBody> poly_box;
+    addSlidingBoxScene(soccp_engine, soccp_box);
+    addSlidingBoxScene(poly_engine, poly_box);
+
+    constexpr int num_steps = 80;
+    double max_x_diff = 0.0;
+    double max_z_diff = 0.0;
+    double max_vx_diff = 0.0;
+    double max_vz_diff = 0.0;
+    double max_penetration_diff = 0.0;
+
+    for (int step = 0; step < num_steps; ++step) {
+        soccp_engine.step();
+        poly_engine.step();
+        max_x_diff = std::max(
+            max_x_diff,
+            std::abs(soccp_box->position().x() - poly_box->position().x()));
+        max_z_diff = std::max(
+            max_z_diff,
+            std::abs(soccp_box->position().z() - poly_box->position().z()));
+        max_vx_diff = std::max(
+            max_vx_diff,
+            std::abs(soccp_box->linearVelocity().x() - poly_box->linearVelocity().x()));
+        max_vz_diff = std::max(
+            max_vz_diff,
+            std::abs(soccp_box->linearVelocity().z() - poly_box->linearVelocity().z()));
+        max_penetration_diff = std::max(
+            max_penetration_diff,
+            std::abs(
+                maxContactPenetration(soccp_engine.getContacts()) -
+                maxContactPenetration(poly_engine.getContacts())));
+    }
+
+    std::cout << "Max x difference: " << max_x_diff << std::endl;
+    std::cout << "Max z difference: " << max_z_diff << std::endl;
+    std::cout << "Max vx difference: " << max_vx_diff << std::endl;
+    std::cout << "Max vz difference: " << max_vz_diff << std::endl;
+    std::cout << "Max penetration difference: " << max_penetration_diff << std::endl;
+
+    const bool passed =
+        max_x_diff < 2e-2 &&
+        max_z_diff < 2e-2 &&
+        max_vx_diff < 5e-2 &&
+        max_vz_diff < 5e-2 &&
+        max_penetration_diff < 5e-3;
+    std::cout << "Result: " << (passed ? "PASSED" : "FAILED") << std::endl;
+    return passed;
+}
+
 int main() {
     std::cout << "****************************************" << std::endl;
     std::cout << "Phase 5 Acceptance Tests" << std::endl;
@@ -538,6 +845,9 @@ int main() {
     bool test6 = testSpatialHash();
     bool test7 = testAABB();
     bool test8 = testEngineNormalLCPBaseline();
+    bool test9 = testEngineMeshSDFConsistency();
+    bool test10 = testEngineMeshSDFMultiContactConsistency();
+    bool test11 = testEnginePolyhedralFrictionBaseline();
 
     std::cout << "\n****************************************" << std::endl;
     std::cout << "Phase 5 Acceptance Summary" << std::endl;
@@ -550,8 +860,13 @@ int main() {
     std::cout << "Spatial Hash: " << (test6 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "AABB: " << (test7 ? "PASSED" : "FAILED") << std::endl;
     std::cout << "Engine Normal LCP: " << (test8 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Engine Mesh-SDF: " << (test9 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Engine Mesh-SDF Multi-Contact: " << (test10 ? "PASSED" : "FAILED") << std::endl;
+    std::cout << "Engine Polyhedral Friction: " << (test11 ? "PASSED" : "FAILED") << std::endl;
 
-    bool all_passed = test1 && test2 && test3 && test4 && test5 && test6 && test7 && test8;
+    bool all_passed =
+        test1 && test2 && test3 && test4 && test5 &&
+        test6 && test7 && test8 && test9 && test10 && test11;
 
     std::cout << "\nOverall: " << (all_passed ? "ALL TESTS PASSED" : "SOME TESTS FAILED") << std::endl;
     std::cout << "****************************************" << std::endl;
